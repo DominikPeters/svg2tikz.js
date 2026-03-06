@@ -1,0 +1,16 @@
+\begin{tikzpicture}
+  \definecolor{gray1}{HTML}{4A90D9}
+  \definecolor{darkgray1}{HTML}{2C3E50}
+  \definecolor{brown1}{HTML}{E74C3C}
+  \definecolor{purple1}{HTML}{C0392B}
+  \definecolor{teal1}{HTML}{2ECC71}
+  \definecolor{teal2}{HTML}{27AE60}
+  \definecolor{gray2}{HTML}{8E44AD}
+  \definecolor{orange1}{HTML}{F39C12}
+  \definecolor{orange2}{HTML}{E67E22}
+  \draw[darkgray1, fill=gray1, line width=2.85pt, rounded corners=7.11pt] (0.5,9.5) rectangle (4.5,6.5);
+  \draw[purple1, fill=brown1, line width=2.85pt] (7.5,8) circle[radius=1.5cm];
+  \draw[teal2, fill=teal1, line width=2.85pt] (3,3) ellipse[x radius=2cm, y radius=1.25cm];
+  \draw[gray2, line width=4.27pt] (5.5,5) -- (9.5,1);
+  \draw[orange2, fill=orange1, line width=2.85pt] (7.5,5) -- (9,1.5) -- (6,1.5) -- cycle;
+\end{tikzpicture}

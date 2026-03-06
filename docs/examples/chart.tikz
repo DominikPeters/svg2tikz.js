@@ -1,0 +1,17 @@
+\begin{tikzpicture}
+  \definecolor{darkgray1}{HTML}{333333}
+  \definecolor{teal1}{HTML}{3498DB}
+  \definecolor{teal2}{HTML}{2ECC71}
+  \definecolor{brown1}{HTML}{E74C3C}
+  \definecolor{orange1}{HTML}{F39C12}
+  \draw[darkgray1, line width=1.64pt] (1.54,6.54) -- (1.54,1.15);
+  \draw[darkgray1, line width=1.64pt] (1.54,1.15) -- (9.62,1.15);
+  \fill[teal1] (2.12,5) rectangle (3.27,1.15);
+  \fill[teal2] (3.85,3.85) rectangle (5,1.15);
+  \fill[brown1] (5.58,5.77) rectangle (6.73,1.15);
+  \fill[orange1] (7.31,3.08) rectangle (8.46,1.15);
+  \node[text=darkgray1, anchor=base] at (2.69,0.38) {A};
+  \node[text=darkgray1, anchor=base] at (4.42,0.38) {B};
+  \node[text=darkgray1, anchor=base] at (6.15,0.38) {C};
+  \node[text=darkgray1, anchor=base] at (7.88,0.38) {D};
+\end{tikzpicture}

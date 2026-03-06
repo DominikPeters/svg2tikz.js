@@ -1,0 +1,28 @@
+\begin{tikzpicture}
+  \definecolor{white1}{HTML}{F5F7FB}
+  \definecolor{white2}{HTML}{DFE9FF}
+  \definecolor{teal1}{HTML}{3C5AA6}
+  \definecolor{pink1}{HTML}{FFCC80}
+  \definecolor{olive1}{HTML}{9C5B19}
+  \definecolor{white3}{HTML}{D7F4D3}
+  \definecolor{darkgray1}{HTML}{2D7A3E}
+  \fill[white1] (0,7.69) rectangle (10,0);
+  \begin{scope}[opacity=0.65, transparency group]
+    \begin{scope}[transform shape, xshift=2.23cm, yshift=-1.54cm, rotate around={12:(0,7.69)}]
+      \draw[teal1, fill=white2, line width=3.28pt, rounded corners=10.94pt] (-1,8.31) rectangle (3.62,5.46);
+      \draw[olive1, fill=pink1, line width=2.19pt] (1,6.92) circle[radius=0.62cm];
+      \node[anchor=base west, font={\sffamily\large\bfseries}] at (1.31,6.62) {Scope A};
+    \end{scope}
+  \end{scope}
+  \begin{scope}[opacity=0.82, transparency group]
+    \begin{scope}[transform shape, xshift=6.62cm, yshift=3.15cm, xscale=1.15, yscale=0.8, yshift=-7.69cm, rotate around={-18:(0,7.69)}]
+      \draw[darkgray1, fill=white3, line width=3.28pt] (0,7.69) ellipse[x radius=1.69cm, y radius=1cm];
+      \draw[darkgray1, line width=2.74pt, dash pattern=on 8.75pt off 3.28pt] (-1.15,7.69)
+        -- (0,8.54)
+        -- (1.15,7.69)
+        -- (0,6.85)
+        -- cycle;
+      \node[anchor=base, font={\sffamily\large\itshape}] at (0,7.46) {Scope B};
+    \end{scope}
+  \end{scope}
+\end{tikzpicture}
