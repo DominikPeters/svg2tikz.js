@@ -1,6 +1,6 @@
 {
   "name": "svg2tikz",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Convert SVG files to TikZ (LaTeX) graphics",
   "type": "module",
   "main": "./dist/src/svg2tikz.js",
