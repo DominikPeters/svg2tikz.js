@@ -16,7 +16,7 @@
     }
   },
   "bin": {
-    "svg2tikz": "./dist/bin/svg2tikz.js"
+    "svg2tikz": "dist/bin/svg2tikz.js"
   },
   "files": [
     "dist/src",
