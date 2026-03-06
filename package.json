@@ -1,16 +1,47 @@
 {
   "name": "svg2tikz",
-  "private": true,
+  "version": "0.1.0",
+  "description": "Convert SVG files to TikZ (LaTeX) graphics",
   "type": "module",
+  "main": "./src/svg2tikz.js",
+  "exports": {
+    ".": "./src/svg2tikz.js",
+    "./node-env": "./src/node-env.js"
+  },
   "bin": {
     "svg2tikz": "./bin/svg2tikz.js"
   },
+  "files": [
+    "src",
+    "bin"
+  ],
   "scripts": {
     "dev": "npx serve -p 8123",
-    "test": "node --test",
-    "cli": "node ./bin/svg2tikz.js"
+    "test": "node --test"
   },
-  "devDependencies": {
+  "keywords": [
+    "svg",
+    "tikz",
+    "latex",
+    "tex",
+    "convert",
+    "graphics",
+    "vector"
+  ],
+  "author": "Dominik Peters",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/DominikPeters/svg2tikz.js.git"
+  },
+  "bugs": {
+    "url": "https://github.com/DominikPeters/svg2tikz.js/issues"
+  },
+  "homepage": "https://github.com/DominikPeters/svg2tikz.js#readme",
+  "dependencies": {
     "jsdom": "^26.0.0"
+  },
+  "engines": {
+    "node": ">=18"
   }
 }
