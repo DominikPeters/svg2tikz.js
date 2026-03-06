@@ -1,0 +1,517 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>SVG → TikZ Converter</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "Segoe UI", Helvetica, sans-serif;
+    font-size: 13px;
+    background: #e8e8e8;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* ── Toolbar ── */
+  .toolbar {
+    background: #d4d0c8;
+    border-bottom: 1px solid #808080;
+    padding: 4px 8px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+  }
+  .toolbar h1 {
+    font-size: 14px;
+    font-weight: 600;
+    margin-right: 12px;
+  }
+  .toolbar select, .toolbar button {
+    font-size: 12px;
+    padding: 2px 8px;
+    background: #fff;
+    border: 1px solid #808080;
+    cursor: pointer;
+  }
+  .toolbar button:hover { background: #e8e8e8; }
+  .toolbar button:active { background: #d0d0d0; }
+  .toolbar label { font-size: 12px; }
+  .toolbar input[type="number"] {
+    width: 50px;
+    font-size: 12px;
+    padding: 2px 4px;
+    border: 1px solid #808080;
+  }
+  .toolbar input[type="checkbox"] { margin-right: 2px; }
+
+  /* ── Main layout: 2×2 grid ── */
+  .main {
+    flex: 1;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: 1fr 1fr;
+    min-height: 0;
+  }
+
+  /* ── Panels ── */
+  .panel {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+    border-right: 1px solid #808080;
+    border-bottom: 1px solid #808080;
+  }
+  .panel:nth-child(2n) { border-right: none; }
+  .panel:nth-child(n+3) { border-bottom: none; }
+  .panel-header {
+    background: #d4d0c8;
+    border-bottom: 1px solid #808080;
+    padding: 3px 8px;
+    font-weight: 600;
+    font-size: 12px;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .panel-header .render-btn {
+    font-size: 11px;
+    padding: 1px 6px;
+    background: #fff;
+    border: 1px solid #808080;
+    cursor: pointer;
+    margin-left: auto;
+  }
+  .panel-header .render-btn:hover { background: #e8e8e8; }
+  .panel-body {
+    flex: 1;
+    overflow: auto;
+    min-height: 0;
+  }
+
+  /* ── Textareas ── */
+  textarea {
+    width: 100%;
+    height: 100%;
+    border: none;
+    resize: none;
+    padding: 8px;
+    font-family: "SF Mono", "Fira Code", "Consolas", monospace;
+    font-size: 12px;
+    line-height: 1.4;
+    tab-size: 2;
+    outline: none;
+  }
+  #svg-input { background: #fff; }
+  #tikz-output { background: #fffff8; color: #333; }
+
+  /* ── Previews ── */
+  .preview {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #fff;
+    padding: 16px;
+    height: 100%;
+  }
+  .preview svg {
+    max-width: 100%;
+    max-height: 100%;
+  }
+  #svg-preview svg { border: 1px dashed #ccc; }
+  #tikz-preview .loading {
+    color: #888;
+    font-style: italic;
+  }
+
+  /* ── Drag & drop ── */
+  body.dragover::after {
+    content: 'Drop SVG file here';
+    position: fixed;
+    inset: 0;
+    background: rgba(52, 152, 219, 0.15);
+    border: 3px dashed #3498db;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 24px;
+    font-weight: 600;
+    color: #2c3e50;
+    z-index: 999;
+    pointer-events: none;
+  }
+
+  /* ── Status bar ── */
+  .statusbar {
+    background: #d4d0c8;
+    border-top: 1px solid #808080;
+    padding: 2px 8px;
+    font-size: 11px;
+    color: #444;
+    flex-shrink: 0;
+  }
+</style>
+</head>
+<body>
+
+<div class="toolbar">
+  <h1>SVG → TikZ</h1>
+  <label>Example:</label>
+  <select id="example-select">
+    <option value="">— select —</option>
+    <option value="basic-shapes">Basic Shapes</option>
+    <option value="paths">Paths & Curves</option>
+    <option value="styled">Styled Elements</option>
+    <option value="logo">Simple Logo</option>
+    <option value="chart">Bar Chart</option>
+    <option value="arrows">Arrows</option>
+    <option value="gradient">Gradients</option>
+    <option value="css-classes">CSS Classes</option>
+  </select>
+  <label>Precision:</label>
+  <input type="number" id="precision" value="2" min="0" max="6">
+  <label><input type="checkbox" id="standalone">Standalone</label>
+  <button id="convert-btn">Convert ▶</button>
+  <button id="copy-btn">Copy TikZ</button>
+</div>
+
+<div class="main">
+  <!-- Top-left: SVG input -->
+  <div class="panel">
+    <div class="panel-header">SVG Input</div>
+    <div class="panel-body">
+      <textarea id="svg-input" spellcheck="false" placeholder="Paste SVG code here..."></textarea>
+    </div>
+  </div>
+
+  <!-- Top-right: SVG preview -->
+  <div class="panel">
+    <div class="panel-header">SVG Preview</div>
+    <div class="panel-body">
+      <div class="preview" id="svg-preview"></div>
+    </div>
+  </div>
+
+  <!-- Bottom-left: TikZ output -->
+  <div class="panel">
+    <div class="panel-header">TikZ Output</div>
+    <div class="panel-body">
+      <textarea id="tikz-output" readonly spellcheck="false" placeholder="TikZ code will appear here..."></textarea>
+    </div>
+  </div>
+
+  <!-- Bottom-right: TikZ render -->
+  <div class="panel">
+    <div class="panel-header">
+      TikZ Render
+      <button class="render-btn" id="render-btn">Render ▶</button>
+    </div>
+    <div class="panel-body">
+      <div class="preview" id="tikz-preview">
+        <span class="loading">Click "Render" to preview TikZ</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="statusbar">
+  <span id="status">Ready</span>
+</div>
+
+<script type="module">
+import { svgToTikz } from './src/svg2tikz.js';
+
+const svgInput = document.getElementById('svg-input');
+const svgPreview = document.getElementById('svg-preview');
+const tikzOutput = document.getElementById('tikz-output');
+const tikzPreview = document.getElementById('tikz-preview');
+const status = document.getElementById('status');
+
+// ── Examples ──
+
+const EXAMPLES = {
+  'basic-shapes': `<svg viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+  <rect x="10" y="10" width="80" height="60" fill="#4a90d9" stroke="#2c3e50" stroke-width="2" rx="5"/>
+  <circle cx="150" cy="40" r="30" fill="#e74c3c" stroke="#c0392b" stroke-width="2"/>
+  <ellipse cx="60" cy="140" rx="40" ry="25" fill="#2ecc71" stroke="#27ae60" stroke-width="2"/>
+  <line x1="110" y1="100" x2="190" y2="180" stroke="#8e44ad" stroke-width="3"/>
+  <polygon points="150,100 180,170 120,170" fill="#f39c12" stroke="#e67e22" stroke-width="2"/>
+</svg>`,
+
+  'paths': `<svg viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+  <path d="M 20 80 C 20 20, 80 20, 80 80 S 140 140, 140 80" fill="none" stroke="#e74c3c" stroke-width="2"/>
+  <path d="M 20 150 Q 60 100, 100 150 T 180 150" fill="none" stroke="#3498db" stroke-width="2"/>
+  <path d="M 160 20 A 30 30 0 1 1 160 80" fill="none" stroke="#2ecc71" stroke-width="2"/>
+  <path d="M 20 180 L 60 160 L 100 190 L 140 160 L 180 180" fill="none" stroke="#9b59b6" stroke-width="2" stroke-dasharray="5,3"/>
+</svg>`,
+
+  'styled': `<svg viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+  <rect x="10" y="10" width="180" height="180" fill="#ecf0f1" stroke="#bdc3c7" stroke-width="1"/>
+  <circle cx="60" cy="60" r="30" fill="#3498db" fill-opacity="0.6"/>
+  <circle cx="100" cy="60" r="30" fill="#e74c3c" fill-opacity="0.6"/>
+  <circle cx="80" cy="90" r="30" fill="#2ecc71" fill-opacity="0.6"/>
+  <text x="100" y="160" text-anchor="middle" font-size="16" font-weight="bold" fill="#2c3e50">Venn</text>
+</svg>`,
+
+  'logo': `<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+  <circle cx="50" cy="50" r="45" fill="#2c3e50"/>
+  <path d="M 30 65 L 50 25 L 70 65 Z" fill="#ecf0f1"/>
+  <circle cx="50" cy="50" r="8" fill="#e74c3c"/>
+</svg>`,
+
+  'chart': `<svg viewBox="0 0 260 180" xmlns="http://www.w3.org/2000/svg">
+  <!-- axes -->
+  <line x1="40" y1="10" x2="40" y2="150" stroke="#333" stroke-width="1.5"/>
+  <line x1="40" y1="150" x2="250" y2="150" stroke="#333" stroke-width="1.5"/>
+  <!-- bars -->
+  <rect x="55" y="50" width="30" height="100" fill="#3498db"/>
+  <rect x="100" y="80" width="30" height="70" fill="#2ecc71"/>
+  <rect x="145" y="30" width="30" height="120" fill="#e74c3c"/>
+  <rect x="190" y="100" width="30" height="50" fill="#f39c12"/>
+  <!-- labels -->
+  <text x="70" y="170" text-anchor="middle" font-size="11" fill="#333">A</text>
+  <text x="115" y="170" text-anchor="middle" font-size="11" fill="#333">B</text>
+  <text x="160" y="170" text-anchor="middle" font-size="11" fill="#333">C</text>
+  <text x="205" y="170" text-anchor="middle" font-size="11" fill="#333">D</text>
+</svg>`,
+
+  'arrows': `<svg viewBox="0 0 200 150" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <marker id="arrowEnd" viewBox="0 0 10 10" refX="10" refY="5"
+            markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#333"/>
+    </marker>
+    <marker id="arrowStart" viewBox="0 0 10 10" refX="0" refY="5"
+            markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 10 0 L 0 5 L 10 10 z" fill="#e74c3c"/>
+    </marker>
+  </defs>
+  <line x1="20" y1="30" x2="180" y2="30" stroke="#333" stroke-width="2" marker-end="url(#arrowEnd)"/>
+  <line x1="20" y1="75" x2="180" y2="75" stroke="#e74c3c" stroke-width="2" marker-start="url(#arrowStart)" marker-end="url(#arrowEnd)"/>
+  <path d="M 20 120 C 60 80, 140 80, 180 120" stroke="#3498db" stroke-width="2" fill="none" marker-end="url(#arrowEnd)"/>
+</svg>`,
+
+  'gradient': `<svg viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="horizGrad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#3498db"/>
+      <stop offset="100%" stop-color="#e74c3c"/>
+    </linearGradient>
+    <linearGradient id="vertGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#2ecc71"/>
+      <stop offset="100%" stop-color="#f39c12"/>
+    </linearGradient>
+    <radialGradient id="radGrad">
+      <stop offset="0%" stop-color="#fff"/>
+      <stop offset="100%" stop-color="#8e44ad"/>
+    </radialGradient>
+  </defs>
+  <rect x="10" y="10" width="85" height="85" fill="url(#horizGrad)" stroke="#333"/>
+  <rect x="105" y="10" width="85" height="85" fill="url(#vertGrad)" stroke="#333"/>
+  <circle cx="100" cy="155" r="40" fill="url(#radGrad)" stroke="#333"/>
+</svg>`,
+
+  'css-classes': `<svg viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .box { fill: #3498db; stroke: #2c3e50; stroke-width: 2; }
+    .highlight { fill: #e74c3c; stroke: #c0392b; stroke-width: 2; }
+    .outline { fill: none; stroke: #27ae60; stroke-width: 3; }
+  </style>
+  <rect class="box" x="10" y="10" width="80" height="60"/>
+  <rect class="box" x="10" y="80" width="80" height="60"/>
+  <rect class="highlight" x="110" y="10" width="80" height="60"/>
+  <circle class="outline" cx="150" cy="140" r="40"/>
+  <circle class="highlight" cx="50" cy="170" r="25"/>
+</svg>`,
+};
+
+// ── Convert logic ──
+
+function convert() {
+  const svg = svgInput.value.trim();
+  if (!svg) {
+    tikzOutput.value = '';
+    svgPreview.innerHTML = '<span style="color:#888">No SVG input</span>';
+    status.textContent = 'Ready';
+    return;
+  }
+
+  // SVG Preview
+  try {
+    svgPreview.innerHTML = svg;
+    const svgEl = svgPreview.querySelector('svg');
+    if (svgEl) {
+      svgEl.style.maxWidth = '100%';
+      svgEl.style.maxHeight = '100%';
+    }
+  } catch (e) {
+    svgPreview.innerHTML = '<span style="color:red">Invalid SVG</span>';
+  }
+
+  // Convert to TikZ
+  try {
+    const precision = parseInt(document.getElementById('precision').value) || 2;
+    const standalone = document.getElementById('standalone').checked;
+    const tikz = svgToTikz(svg, { precision, standalone });
+    tikzOutput.value = tikz;
+    const lineCount = tikz.split('\n').length;
+    status.textContent = `Converted: ${lineCount} lines of TikZ`;
+    renderTikz();
+  } catch (e) {
+    tikzOutput.value = `% Error: ${e.message}`;
+    status.textContent = `Error: ${e.message}`;
+    console.error(e);
+  }
+}
+
+// ── TikZ rendering via tikzjax ──
+
+const TIKZJAX_FONTS_CSS = 'https://cdn.jsdelivr.net/npm/@drgrice1/tikzjax@1.0.0-beta24/dist/fonts.css';
+const TIKZJAX_JS = 'https://cdn.jsdelivr.net/npm/@drgrice1/tikzjax@1.0.0-beta24/dist/tikzjax.js';
+
+let tikzjaxState = 'idle'; // idle | loading | loaded | error
+let tikzjaxPromise = null;
+
+function ensureTikzJaxLoaded() {
+  if (tikzjaxState === 'loaded') return Promise.resolve();
+  if (tikzjaxPromise) return tikzjaxPromise;
+
+  tikzjaxState = 'loading';
+  tikzjaxPromise = new Promise((resolve, reject) => {
+    const link = document.createElement('link');
+    link.rel = 'stylesheet';
+    link.href = TIKZJAX_FONTS_CSS;
+    document.head.appendChild(link);
+
+    const script = document.createElement('script');
+    script.src = TIKZJAX_JS;
+    script.onload = () => { tikzjaxState = 'loaded'; resolve(); };
+    script.onerror = () => {
+      tikzjaxState = 'idle';
+      tikzjaxPromise = null;
+      reject(new Error('Failed to load TikZJax'));
+    };
+    document.head.appendChild(script);
+  });
+  return tikzjaxPromise;
+}
+
+function renderTikz() {
+  const tikzCode = tikzOutput.value.trim();
+  if (!tikzCode) {
+    tikzPreview.innerHTML = '<span class="loading">No TikZ code to render</span>';
+    return;
+  }
+
+  const match = tikzCode.match(/\\begin\{tikzpicture\}[\s\S]*?\\end\{tikzpicture\}/);
+  if (!match) {
+    tikzPreview.innerHTML = '<span class="loading">No \\begin{tikzpicture} found</span>';
+    return;
+  }
+
+  tikzPreview.innerHTML = '<span class="loading">Loading TikZJax...</span>';
+
+  ensureTikzJaxLoaded().then(() => {
+    tikzPreview.innerHTML = '<span class="loading">Compiling...</span>';
+
+    const tikzScript = document.createElement('script');
+    tikzScript.type = 'text/tikz';
+    tikzScript.textContent = match[0];
+
+    const container = document.createElement('div');
+    container.appendChild(tikzScript);
+
+    tikzPreview.innerHTML = '';
+    tikzPreview.appendChild(container);
+
+    const onFinished = (e) => {
+      if (tikzPreview.contains(e.target)) {
+        const svg = tikzPreview.querySelector('svg');
+        if (svg) {
+          // Give explicit size based on viewBox so it's visible in the flex container
+          const vb = svg.getAttribute('viewBox');
+          if (vb) {
+            const [,, w, h] = vb.split(/[\s,]+/).map(Number);
+            svg.style.width = w + 'px';
+            svg.style.height = h + 'px';
+            svg.style.maxWidth = '100%';
+            svg.style.maxHeight = '100%';
+          }
+        }
+        status.textContent = 'TikZ rendered successfully';
+        document.removeEventListener('tikzjax-load-finished', onFinished);
+      }
+    };
+    document.addEventListener('tikzjax-load-finished', onFinished);
+  }).catch((err) => {
+    tikzPreview.innerHTML = `<span class="loading">Error: ${err.message}</span>`;
+  });
+}
+
+// ── Event handlers ──
+
+document.getElementById('convert-btn').addEventListener('click', convert);
+document.getElementById('render-btn').addEventListener('click', renderTikz);
+
+svgInput.addEventListener('input', () => {
+  clearTimeout(svgInput._debounce);
+  svgInput._debounce = setTimeout(convert, 400);
+});
+
+document.getElementById('example-select').addEventListener('change', (e) => {
+  const key = e.target.value;
+  if (EXAMPLES[key]) {
+    svgInput.value = EXAMPLES[key];
+    convert();
+  }
+});
+
+document.getElementById('copy-btn').addEventListener('click', () => {
+  navigator.clipboard.writeText(tikzOutput.value).then(() => {
+    status.textContent = 'Copied to clipboard!';
+    setTimeout(() => { status.textContent = 'Ready'; }, 1500);
+  });
+});
+
+document.getElementById('precision').addEventListener('change', convert);
+document.getElementById('standalone').addEventListener('change', convert);
+
+// ── Drag & drop SVG files ──
+
+document.addEventListener('dragover', (e) => {
+  e.preventDefault();
+  document.body.classList.add('dragover');
+});
+document.addEventListener('dragleave', (e) => {
+  if (e.relatedTarget === null) document.body.classList.remove('dragover');
+});
+document.addEventListener('drop', (e) => {
+  e.preventDefault();
+  document.body.classList.remove('dragover');
+  const file = e.dataTransfer.files[0];
+  if (!file) return;
+  if (!file.name.endsWith('.svg') && file.type !== 'image/svg+xml') {
+    status.textContent = 'Not an SVG file';
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = () => {
+    svgInput.value = reader.result;
+    document.getElementById('example-select').value = '';
+    convert();
+    status.textContent = `Loaded ${file.name}`;
+  };
+  reader.readAsText(file);
+});
+
+// Load basic shapes example on start
+document.getElementById('example-select').value = 'basic-shapes';
+svgInput.value = EXAMPLES['basic-shapes'];
+convert();
+</script>
+</body>
+</html>

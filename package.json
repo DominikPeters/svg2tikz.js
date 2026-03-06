@@ -1,0 +1,8 @@
+{
+  "name": "svg2tikz",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "npx serve -p 8123"
+  }
+}
