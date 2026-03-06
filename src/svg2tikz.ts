@@ -43,7 +43,13 @@ const CSS_COLOR_KEYWORDS = new Map([
   ['none', null],
 ]);
 
-const XCOLOR_COLORS = [
+export interface SvgToTikzOptions {
+  precision?: number;
+  scale?: number | null;
+  standalone?: boolean;
+}
+
+const XCOLOR_COLORS: Array<[string, number, number, number]> = [
   ['black', 0, 0, 0], ['darkgray', 64, 64, 64], ['gray', 128, 128, 128],
   ['lightgray', 191, 191, 191], ['white', 255, 255, 255],
   ['red', 255, 0, 0], ['green', 0, 255, 0], ['blue', 0, 0, 255],
@@ -59,7 +65,7 @@ for (const [name, r, g, b] of XCOLOR_COLORS) {
   XCOLOR_EXACT.set(hex, name);
 }
 
-export function svgToTikz(svgInput, options = {}) {
+export function svgToTikz(svgInput: string | Element, options: SvgToTikzOptions = {}): string {
   const {
     precision = 2,
     scale = null,

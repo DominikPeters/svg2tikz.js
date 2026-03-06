@@ -1,6 +1,6 @@
 # svg2tikz
 
-Convert SVG files to TikZ (LaTeX) graphics.
+Convert SVG files to TikZ graphics for use in LaTeX.
 
 ## Installation
 
@@ -37,7 +37,7 @@ svg2tikz input.svg -p 3 -o output.tex
 
 ### Browser
 
-```javascript
+```typescript
 import { svgToTikz } from 'svg2tikz';
 
 const svg = `<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
@@ -52,7 +52,7 @@ console.log(tikz);
 
 In Node.js, you need to set up a DOM environment first:
 
-```javascript
+```typescript
 import { installNodeSvgEnvironment } from 'svg2tikz/node-env';
 import { svgToTikz } from 'svg2tikz';
 

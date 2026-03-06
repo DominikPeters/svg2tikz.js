@@ -3,21 +3,31 @@
   "version": "0.1.0",
   "description": "Convert SVG files to TikZ (LaTeX) graphics",
   "type": "module",
-  "main": "./src/svg2tikz.js",
+  "main": "./dist/src/svg2tikz.js",
+  "types": "./dist/src/svg2tikz.d.ts",
   "exports": {
-    ".": "./src/svg2tikz.js",
-    "./node-env": "./src/node-env.js"
+    ".": {
+      "types": "./dist/src/svg2tikz.d.ts",
+      "default": "./dist/src/svg2tikz.js"
+    },
+    "./node-env": {
+      "types": "./dist/src/node-env.d.ts",
+      "default": "./dist/src/node-env.js"
+    }
   },
   "bin": {
-    "svg2tikz": "./bin/svg2tikz.js"
+    "svg2tikz": "./dist/bin/svg2tikz.js"
   },
   "files": [
-    "src",
-    "bin"
+    "dist/src",
+    "dist/bin"
   ],
   "scripts": {
+    "build": "tsc",
+    "predev": "npm run build",
     "dev": "npx serve -p 8123",
-    "test": "node --test"
+    "pretest": "npm run build",
+    "test": "node --test dist/test/**/*.test.js"
   },
   "keywords": [
     "svg",
@@ -40,6 +50,10 @@
   "homepage": "https://github.com/DominikPeters/svg2tikz.js#readme",
   "dependencies": {
     "jsdom": "^26.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.5.2",
+    "typescript": "^5.9.2"
   },
   "engines": {
     "node": ">=18"

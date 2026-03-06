@@ -7,7 +7,7 @@ import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
-const cliPath = path.resolve('bin/svg2tikz.js');
+const cliPath = path.resolve('dist/bin/svg2tikz.js');
 
 test('cli converts SVG from stdin', async () => {
   const svg = `<svg viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg"><rect x="2" y="2" width="8" height="6" fill="#ff0000"/></svg>`;
