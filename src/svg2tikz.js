@@ -1,25 +1,74 @@
 import { parsePath } from './path-parser.js';
 
-// ── Public API ──────────────────────────────────────────────────────────────
+const SVG_NS = 'http://www.w3.org/2000/svg';
+const XLINK_NS = 'http://www.w3.org/1999/xlink';
+const CM_TO_PT = 28.4528;
+const EPSILON = 1e-9;
+
+const INHERITED_PROPS = new Set([
+  'fill', 'fill-rule', 'stroke', 'stroke-width', 'stroke-dasharray',
+  'stroke-dashoffset', 'stroke-linecap', 'stroke-linejoin', 'stroke-miterlimit',
+  'font-family', 'font-size', 'font-style', 'font-weight',
+  'text-anchor', 'dominant-baseline', 'alignment-baseline', 'visibility',
+  'marker-start', 'marker-mid', 'marker-end',
+]);
+
+const CSS_COLOR_KEYWORDS = new Map([
+  ['black', '000000'],
+  ['silver', 'C0C0C0'],
+  ['gray', '808080'],
+  ['white', 'FFFFFF'],
+  ['maroon', '800000'],
+  ['red', 'FF0000'],
+  ['purple', '800080'],
+  ['fuchsia', 'FF00FF'],
+  ['green', '008000'],
+  ['lime', '00FF00'],
+  ['olive', '808000'],
+  ['yellow', 'FFFF00'],
+  ['navy', '000080'],
+  ['blue', '0000FF'],
+  ['teal', '008080'],
+  ['aqua', '00FFFF'],
+  ['orange', 'FFA500'],
+  ['brown', 'A52A2A'],
+  ['pink', 'FFC0CB'],
+  ['magenta', 'FF00FF'],
+  ['cyan', '00FFFF'],
+  ['darkgray', 'A9A9A9'],
+  ['darkgrey', 'A9A9A9'],
+  ['lightgray', 'D3D3D3'],
+  ['lightgrey', 'D3D3D3'],
+  ['transparent', null],
+  ['none', null],
+]);
+
+const XCOLOR_COLORS = [
+  ['black', 0, 0, 0], ['darkgray', 64, 64, 64], ['gray', 128, 128, 128],
+  ['lightgray', 191, 191, 191], ['white', 255, 255, 255],
+  ['red', 255, 0, 0], ['green', 0, 255, 0], ['blue', 0, 0, 255],
+  ['cyan', 0, 255, 255], ['magenta', 255, 0, 255], ['yellow', 255, 255, 0],
+  ['lime', 191, 255, 0], ['olive', 128, 128, 0], ['orange', 255, 128, 0],
+  ['pink', 255, 191, 191], ['teal', 0, 128, 128], ['violet', 128, 0, 128],
+  ['purple', 191, 0, 64], ['brown', 191, 128, 64],
+];
+
+const XCOLOR_EXACT = new Map();
+for (const [name, r, g, b] of XCOLOR_COLORS) {
+  const hex = ((r << 16) | (g << 8) | b).toString(16).toUpperCase().padStart(6, '0');
+  XCOLOR_EXACT.set(hex, name);
+}
 
 export function svgToTikz(svgInput, options = {}) {
   const {
     precision = 2,
-    scale = null,       // auto-computed if null
-    standalone = false,  // wrap in \documentclass{standalone} ...
+    scale = null,
+    standalone = false,
   } = options;
 
-  // Parse string input
-  let svgEl;
-  if (typeof svgInput === 'string') {
-    const doc = new DOMParser().parseFromString(svgInput, 'image/svg+xml');
-    svgEl = doc.querySelector('svg');
-    if (!svgEl) throw new Error('No <svg> element found');
-  } else {
-    svgEl = svgInput;
-  }
+  const svgEl = typeof svgInput === 'string' ? parseSvgElement(svgInput) : svgInput;
+  if (!svgEl) throw new Error('No <svg> element found');
 
-  // Determine coordinate space from viewBox or width/height
   const viewBox = parseViewBox(svgEl);
   const computedScale = scale ?? computeAutoScale(viewBox);
 
@@ -27,104 +76,87 @@ export function svgToTikz(svgInput, options = {}) {
     precision,
     scale: computedScale,
     viewBox,
-    colors: new Map(),       // hex -> colorName
+    colors: new Map(),
     lines: [],
     indent: 1,
-    // Preprocessing results
-    classStyles: new Map(),  // className -> { props: Map, tikzOpts: string[] }
-    markers: new Map(),      // id -> { isArrow: bool }
-    gradients: new Map(),    // id -> { type, stops, angle, ... }
-    usesArrows: false,       // whether any arrows are used (to add >=stealth)
-    tikzStyles: [],          // \tikzset lines
+    classStyles: new Map(),
+    markers: new Map(),
+    gradients: new Map(),
+    usesArrows: false,
+    tikzStyles: [],
   };
 
-  // Preprocess defs and style elements
   preprocessDefs(svgEl, ctx);
+  processChildren(svgEl, ctx);
 
-  // Process children
-  processElement(svgEl, ctx, identityTransform());
-
-  // Assemble output
   const parts = [];
   if (standalone) {
     parts.push('\\documentclass[tikz]{standalone}');
     parts.push('\\usepackage{tikz}');
     parts.push('');
+    parts.push('\\begin{document}');
   }
-  if (standalone) parts.push('\\begin{document}');
 
-  // Tikzpicture with options
   const picOpts = [];
   if (ctx.usesArrows) picOpts.push('>=stealth');
-  parts.push(picOpts.length > 0
-    ? `\\begin{tikzpicture}[${picOpts.join(', ')}]`
-    : '\\begin{tikzpicture}');
+  parts.push(picOpts.length ? `\\begin{tikzpicture}[${picOpts.join(', ')}]` : '\\begin{tikzpicture}');
 
-  // Color definitions
   for (const [hex, name] of ctx.colors) {
     parts.push(`  \\definecolor{${name}}{HTML}{${hex}}`);
   }
 
-  // TikZ style definitions from CSS classes
   for (const line of ctx.tikzStyles) {
     parts.push(line);
   }
 
-  // Drawing commands
   for (const line of ctx.lines) {
     parts.push(line);
   }
 
   parts.push('\\end{tikzpicture}');
   if (standalone) parts.push('\\end{document}');
-
   return parts.join('\n');
 }
 
-// ── Preprocessing: defs, styles, markers, gradients ─────────────────────────
+function parseSvgElement(svgInput) {
+  if (typeof DOMParser === 'undefined') {
+    throw new Error('DOMParser is not available in this environment');
+  }
+
+  const doc = new DOMParser().parseFromString(svgInput, 'image/svg+xml');
+  return doc.querySelector('svg');
+}
 
 function preprocessDefs(svgEl, ctx) {
-  // 1. Parse <style> elements for simple class rules
   for (const styleEl of svgEl.querySelectorAll('style')) {
     parseStyleElement(styleEl, ctx);
   }
 
-  // 2. Parse markers
   for (const marker of svgEl.querySelectorAll('marker')) {
     const id = marker.getAttribute('id');
     if (!id) continue;
     ctx.markers.set(id, { isArrow: detectArrowMarker(marker) });
   }
 
-  // 3. Parse gradients
   for (const grad of svgEl.querySelectorAll('linearGradient, radialGradient')) {
     const id = grad.getAttribute('id');
     if (!id) continue;
-    ctx.gradients.set(id, parseGradient(grad, ctx));
+    ctx.gradients.set(id, parseGradient(grad));
   }
 }
 
 function parseStyleElement(styleEl, ctx) {
   const text = styleEl.textContent || '';
-  // Match simple class rules: .className { prop: value; ... }
   const ruleRe = /\.([a-zA-Z_][\w-]*)\s*\{([^}]+)\}/g;
-  let m;
-  while ((m = ruleRe.exec(text))) {
-    const className = m[1];
-    const body = m[2];
-    const props = new Map();
-    for (const decl of body.split(';')) {
-      const colon = decl.indexOf(':');
-      if (colon < 0) continue;
-      const prop = decl.slice(0, colon).trim();
-      const val = decl.slice(colon + 1).trim();
-      if (prop && val) props.set(prop, val);
-    }
+  let match;
 
-    // Convert to TikZ options
+  while ((match = ruleRe.exec(text))) {
+    const className = match[1];
+    const props = parseStyleMap(match[2]);
     const tikzOpts = cssPropsToTikzOpts(props, ctx);
+    ctx.classStyles.set(className, { props, tikzOpts });
+
     if (tikzOpts.length > 0) {
-      ctx.classStyles.set(className, { props, tikzOpts });
       ctx.tikzStyles.push(`  \\tikzset{${className}/.style={${tikzOpts.join(', ')}}}`);
     }
   }
@@ -132,116 +164,153 @@ function parseStyleElement(styleEl, ctx) {
 
 function cssPropsToTikzOpts(props, ctx) {
   const opts = [];
-  const fill = props.get('fill');
-  const stroke = props.get('stroke');
 
-  if (fill && fill !== 'none') {
-    const hex = colorToHex(fill);
-    if (hex) {
-      const c = getTikzColor(hex, ctx);
-      opts.push(c === 'black' ? 'fill' : `fill=${c}`);
-    }
+  appendPaintOptions(opts, {
+    fill: props.get('fill'),
+    fillRule: props.get('fill-rule'),
+    stroke: props.get('stroke'),
+    strokeWidth: props.get('stroke-width'),
+    strokeOpacity: props.get('stroke-opacity'),
+    fillOpacity: props.get('fill-opacity'),
+    strokeDasharray: props.get('stroke-dasharray'),
+    strokeDashoffset: props.get('stroke-dashoffset'),
+    strokeLinecap: props.get('stroke-linecap'),
+    strokeLinejoin: props.get('stroke-linejoin'),
+    strokeMiterlimit: props.get('stroke-miterlimit'),
+    opacity: props.get('opacity'),
+    markerStart: props.get('marker-start'),
+    markerEnd: props.get('marker-end'),
+  }, ctx);
+
+  if (props.get('font-size') || props.get('font-weight') || props.get('font-style') || props.get('font-family')) {
+    const fontOpt = buildFontOption({
+      fontSize: props.get('font-size'),
+      fontWeight: props.get('font-weight'),
+      fontStyle: props.get('font-style'),
+      fontFamily: props.get('font-family'),
+    }, ctx);
+    if (fontOpt) opts.push(fontOpt);
   }
-  if (stroke && stroke !== 'none') {
-    const hex = colorToHex(stroke);
-    if (hex) {
-      const c = getTikzColor(hex, ctx);
-      opts.push(c === 'black' ? 'draw' : `draw=${c}`);
-    }
-  }
-
-  const sw = props.get('stroke-width');
-  if (sw) {
-    const w = parseFloat(sw) || 1;
-    opts.push(`line width=${dimPt(w, ctx)}`);
-  }
-
-  const opacity = props.get('opacity');
-  if (opacity && parseFloat(opacity) < 1) opts.push(`opacity=${parseFloat(opacity)}`);
-
-  const fillOpacity = props.get('fill-opacity');
-  if (fillOpacity && parseFloat(fillOpacity) < 1) opts.push(`fill opacity=${parseFloat(fillOpacity)}`);
-
-  const dash = props.get('stroke-dasharray');
-  if (dash && dash !== 'none') opts.push('dashed');
-
-  const linecap = props.get('stroke-linecap');
-  if (linecap && linecap !== 'butt') opts.push(`line cap=${linecap}`);
-
-  const linejoin = props.get('stroke-linejoin');
-  if (linejoin && linejoin !== 'miter') opts.push(`line join=${linejoin}`);
 
   return opts;
 }
 
 function detectArrowMarker(marker) {
-  // Heuristic: if the marker contains a path/polygon that looks like a triangle,
-  // it's probably an arrowhead. We check if it has 3-4 vertices.
   const path = marker.querySelector('path, polygon');
   if (!path) return false;
-  if (path.tagName === 'polygon') {
-    const pts = (path.getAttribute('points') || '').trim().split(/[\s,]+/);
-    return pts.length >= 4 && pts.length <= 8; // 2-4 points
+
+  if (path.tagName?.toLowerCase() === 'polygon') {
+    const pts = (path.getAttribute('points') || '').trim().split(/[\s,]+/).filter(Boolean);
+    return pts.length >= 4 && pts.length <= 8;
   }
-  // For path, check if d has ~3-4 points (M, L, L, Z pattern)
+
   const d = path.getAttribute('d') || '';
   const segments = parsePath(d);
-  const nonZ = segments.filter(s => s.type !== 'Z');
-  return nonZ.length >= 2 && nonZ.length <= 5;
+  const nonClosed = segments.filter(seg => seg.type !== 'Z');
+  return nonClosed.length >= 2 && nonClosed.length <= 5;
 }
 
-function parseGradient(gradEl, ctx) {
-  const type = gradEl.tagName === 'linearGradient' ? 'linear' : 'radial';
+function parseGradient(gradEl) {
+  const type = gradEl.tagName?.toLowerCase() === 'lineargradient' ? 'linear' : 'radial';
   const stops = [];
 
   for (const stop of gradEl.querySelectorAll('stop')) {
-    const offset = parseFloat(stop.getAttribute('offset')) || 0;
-    // Stop color can be in attribute or style
-    const styleAttr = stop.getAttribute('style') || '';
+    const styleMap = parseStyleMap(stop.getAttribute('style'));
+    const offset = parsePercentOrNumber(stop.getAttribute('offset')) ?? 0;
     const color = stop.getAttribute('stop-color')
-      || stop.style?.stopColor
-      || extractStopColorFromStyle(styleAttr)
+      || styleMap.get('stop-color')
       || 'black';
-    const opacity = parseFloat(
-      stop.getAttribute('stop-opacity')
-      || stop.style?.stopOpacity
-      || extractFromStyle(styleAttr, 'stop-opacity')
-      || '1');
-    const hex = colorToHex(color);
-    stops.push({ offset, hex, opacity });
+    const opacity = parseNumeric(stop.getAttribute('stop-opacity'))
+      ?? parseNumeric(styleMap.get('stop-opacity'))
+      ?? 1;
+    stops.push({ offset, hex: colorToHex(color), opacity });
   }
 
-  // Sort by offset
   stops.sort((a, b) => a.offset - b.offset);
 
   if (type === 'linear') {
-    // Compute angle from x1,y1 → x2,y2
-    const x1 = parseFloat(gradEl.getAttribute('x1')) || 0;
-    const y1 = parseFloat(gradEl.getAttribute('y1')) || 0;
-    const x2 = parseFloat(gradEl.getAttribute('x2') ?? '1');
-    const y2 = parseFloat(gradEl.getAttribute('y2')) || 0;
-    const angleDeg = Math.atan2(y2 - y1, x2 - x1) * 180 / Math.PI;
-    return { type, stops, angle: angleDeg };
+    const x1 = parseNumeric(gradEl.getAttribute('x1')) ?? 0;
+    const y1 = parseNumeric(gradEl.getAttribute('y1')) ?? 0;
+    const x2 = parseNumeric(gradEl.getAttribute('x2')) ?? 1;
+    const y2 = parseNumeric(gradEl.getAttribute('y2')) ?? 0;
+    return {
+      type,
+      stops,
+      angle: Math.atan2(y2 - y1, x2 - x1) * 180 / Math.PI,
+    };
   }
 
   return { type, stops };
 }
 
-function extractFromStyle(styleStr, prop) {
-  if (!styleStr) return null;
-  const re = new RegExp(prop + ':\\s*([^;]+)');
-  const m = styleStr.match(re);
-  return m ? m[1].trim() : null;
-}
-
-function extractStopColorFromStyle(styleStr) {
-  return extractFromStyle(styleStr, 'stop-color');
-}
-
-// ── Coordinate transforms ───────────────────────────────────────────────────
-
 function identityTransform() {
   return [1, 0, 0, 1, 0, 0];
+}
+
+function isIdentityTransform(transform) {
+  const matrix = getTransformMatrix(transform);
+  return matrix.every((value, index) => Math.abs(value - identityTransform()[index]) < EPSILON);
+}
+
+function parseTransformAttr(str) {
+  if (!str) return { matrix: identityTransform(), ops: [] };
+
+  let matrix = identityTransform();
+  const ops = [];
+  const re = /(\w+)\(([^)]+)\)/g;
+  let match;
+
+  while ((match = re.exec(str))) {
+    const fn = match[1];
+    const args = match[2].trim().split(/[\s,]+/).map(Number);
+    let op = null;
+    let opMatrix = identityTransform();
+
+    switch (fn) {
+      case 'translate':
+        op = { type: 'translate', tx: args[0] || 0, ty: args[1] || 0 };
+        opMatrix = [1, 0, 0, 1, op.tx, op.ty];
+        break;
+      case 'scale':
+        op = { type: 'scale', sx: args[0] ?? 1, sy: args[1] ?? args[0] ?? 1 };
+        opMatrix = [op.sx, 0, 0, op.sy, 0, 0];
+        break;
+      case 'rotate': {
+        const angle = (args[0] || 0) * Math.PI / 180;
+        const cos = Math.cos(angle);
+        const sin = Math.sin(angle);
+        const cx = args[1] || 0;
+        const cy = args[2] || 0;
+        const rotation = [cos, sin, -sin, cos, 0, 0];
+        op = { type: 'rotate', angle: args[0] || 0, cx, cy };
+        opMatrix = cx || cy
+          ? multiplyTransforms(multiplyTransforms([1, 0, 0, 1, cx, cy], rotation), [1, 0, 0, 1, -cx, -cy])
+          : rotation;
+        break;
+      }
+      case 'skewX':
+        op = { type: 'skewX', angle: args[0] || 0 };
+        opMatrix = [1, 0, Math.tan((args[0] || 0) * Math.PI / 180), 1, 0, 0];
+        break;
+      case 'skewY':
+        op = { type: 'skewY', angle: args[0] || 0 };
+        opMatrix = [1, Math.tan((args[0] || 0) * Math.PI / 180), 0, 1, 0, 0];
+        break;
+      case 'matrix':
+        if (args.length === 6 && args.every(Number.isFinite)) {
+          op = { type: 'matrix', values: args };
+          opMatrix = args;
+        }
+        break;
+      default:
+        break;
+    }
+
+    matrix = multiplyTransforms(matrix, opMatrix);
+    if (op) ops.push(op);
+  }
+
+  return { matrix, ops };
 }
 
 function multiplyTransforms(a, b) {
@@ -255,238 +324,132 @@ function multiplyTransforms(a, b) {
   ];
 }
 
-function applyTransform(t, x, y) {
-  return [t[0] * x + t[2] * y + t[4], t[1] * x + t[3] * y + t[5]];
-}
-
-function parseTransformAttr(str) {
-  if (!str) return identityTransform();
-  let result = identityTransform();
-  const re = /(\w+)\(([^)]+)\)/g;
-  let m;
-  while ((m = re.exec(str))) {
-    const fn = m[1];
-    const args = m[2].split(/[\s,]+/).map(Number);
-    let t;
-    switch (fn) {
-      case 'translate':
-        t = [1, 0, 0, 1, args[0] || 0, args[1] || 0];
-        break;
-      case 'scale':
-        t = [args[0], 0, 0, args[1] ?? args[0], 0, 0];
-        break;
-      case 'rotate': {
-        const a = args[0] * Math.PI / 180;
-        const cos = Math.cos(a), sin = Math.sin(a);
-        const cx = args[1] || 0, cy = args[2] || 0;
-        if (cx || cy) {
-          t = multiplyTransforms(
-            multiplyTransforms([1, 0, 0, 1, cx, cy], [cos, sin, -sin, cos, 0, 0]),
-            [1, 0, 0, 1, -cx, -cy]
-          );
-        } else {
-          t = [cos, sin, -sin, cos, 0, 0];
-        }
-        break;
-      }
-      case 'skewX': {
-        const a = Math.tan(args[0] * Math.PI / 180);
-        t = [1, 0, a, 1, 0, 0];
-        break;
-      }
-      case 'skewY': {
-        const a = Math.tan(args[0] * Math.PI / 180);
-        t = [1, a, 0, 1, 0, 0];
-        break;
-      }
-      case 'matrix':
-        t = args;
-        break;
-      default:
-        t = identityTransform();
-    }
-    result = multiplyTransforms(result, t);
-  }
-  return result;
-}
-
-// ── ViewBox and scaling ─────────────────────────────────────────────────────
-
 function parseViewBox(svgEl) {
-  const vb = svgEl.getAttribute('viewBox');
-  if (vb) {
-    const parts = vb.split(/[\s,]+/).map(Number);
-    return { x: parts[0], y: parts[1], w: parts[2], h: parts[3] };
+  const viewBox = svgEl.getAttribute('viewBox');
+  if (viewBox) {
+    const [x, y, w, h] = viewBox.split(/[\s,]+/).map(Number);
+    return { x, y, w, h };
   }
-  const w = parseFloat(svgEl.getAttribute('width')) || 300;
-  const h = parseFloat(svgEl.getAttribute('height')) || 150;
-  return { x: 0, y: 0, w, h };
+
+  const width = parseNumeric(svgEl.getAttribute('width')) ?? 300;
+  const height = parseNumeric(svgEl.getAttribute('height')) ?? 150;
+  return { x: 0, y: 0, w: width, h: height };
 }
 
 function computeAutoScale(viewBox) {
   const maxDim = Math.max(viewBox.w, viewBox.h);
-  if (maxDim === 0) return 1;
-  return 10 / maxDim;
+  return maxDim === 0 ? 1 : 10 / maxDim;
 }
 
-// ── Style resolution ────────────────────────────────────────────────────────
-
-// SVG inherited presentation attributes
-const INHERITED_PROPS = new Set([
-  'fill', 'stroke', 'stroke-width', 'opacity', 'fill-opacity',
-  'stroke-opacity', 'stroke-dasharray', 'stroke-linecap', 'stroke-linejoin',
-  'font-family', 'font-size', 'font-weight', 'text-anchor',
-  'marker-start', 'marker-end', 'marker-mid',
-]);
-
-function getStyle(el) {
-  const cs = el.ownerDocument.defaultView?.getComputedStyle(el) ?? null;
-
-  function getOwn(prop) {
-    return el.style?.[prop] || el.getAttribute(prop) || null;
-  }
-
-  function get(prop) {
-    // Check element itself first
-    const own = getOwn(prop);
-    if (own) return own;
-
-    // Computed style (works when rendered in a real document)
-    if (cs?.[prop]) return cs[prop];
-
-    // Manual inheritance: walk up ancestors for inherited SVG properties
-    if (INHERITED_PROPS.has(prop)) {
-      let ancestor = el.parentElement;
-      while (ancestor) {
-        const val = ancestor.style?.[prop] || ancestor.getAttribute(prop);
-        if (val) return val;
-        ancestor = ancestor.parentElement;
-      }
-    }
-
-    return null;
-  }
-
-  // SVG defaults: fill is black (except for stroke-only elements), stroke is none
+function getStyle(el, ctx) {
   const tag = el.tagName?.toLowerCase();
-  const noFillElements = new Set(['line', 'polyline']);
-  const isShape = tag && tag !== 'text' && tag !== 'g' && tag !== 'svg';
-  const defaultFill = isShape && !noFillElements.has(tag) ? 'black' : null;
+  const isShape = tag && !['text', 'g', 'svg', 'defs'].includes(tag);
+  const defaultFill = isShape && !['line', 'polyline'].includes(tag) ? 'black' : null;
+
+  const read = prop => resolveStyleValue(el, prop, ctx);
 
   return {
-    fill: get('fill') ?? defaultFill,
-    stroke: get('stroke') ?? (isShape ? 'none' : null),
-    strokeWidth: get('stroke-width'),
-    opacity: get('opacity'),
-    fillOpacity: get('fill-opacity'),
-    strokeOpacity: get('stroke-opacity'),
-    strokeDasharray: get('stroke-dasharray'),
-    strokeLinecap: get('stroke-linecap'),
-    strokeLinejoin: get('stroke-linejoin'),
-    fontFamily: get('font-family'),
-    fontSize: get('font-size'),
-    fontWeight: get('font-weight'),
-    textAnchor: get('text-anchor'),
-    display: get('display'),
-    visibility: get('visibility'),
-    markerStart: get('marker-start'),
-    markerEnd: get('marker-end'),
-    markerMid: get('marker-mid'),
+    fill: read('fill') ?? defaultFill,
+    fillRule: read('fill-rule'),
+    stroke: read('stroke') ?? (isShape ? 'none' : null),
+    strokeWidth: read('stroke-width'),
+    strokeOpacity: read('stroke-opacity'),
+    fillOpacity: read('fill-opacity'),
+    opacity: read('opacity'),
+    strokeDasharray: read('stroke-dasharray'),
+    strokeDashoffset: read('stroke-dashoffset'),
+    strokeLinecap: read('stroke-linecap'),
+    strokeLinejoin: read('stroke-linejoin'),
+    strokeMiterlimit: read('stroke-miterlimit'),
+    fontFamily: read('font-family'),
+    fontSize: read('font-size'),
+    fontStyle: read('font-style'),
+    fontWeight: read('font-weight'),
+    textAnchor: read('text-anchor'),
+    dominantBaseline: read('dominant-baseline') ?? read('alignment-baseline'),
+    baselineShift: read('baseline-shift'),
+    display: read('display'),
+    visibility: read('visibility'),
+    markerStart: read('marker-start'),
+    markerMid: read('marker-mid'),
+    markerEnd: read('marker-end'),
   };
 }
 
-// Resolve the CSS classes on an element to TikZ style names
-function getClassStyleNames(el, ctx) {
+function resolveStyleValue(el, prop, ctx) {
+  const own = getOwnStyleValue(el, prop, ctx);
+  if (own != null) return own;
+
+  const computed = getComputedStyleValue(el, prop);
+  if (computed != null) return computed;
+
+  if (INHERITED_PROPS.has(prop) && el.parentElement) {
+    return resolveStyleValue(el.parentElement, prop, ctx);
+  }
+
+  return null;
+}
+
+function getOwnStyleValue(el, prop, ctx) {
+  const styleMap = parseStyleMap(el.getAttribute('style'));
+  if (styleMap.has(prop)) return styleMap.get(prop);
+
+  const attr = el.getAttribute(prop);
+  if (attr != null && attr !== '') return attr;
+
+  const classValue = getClassStyleValue(el, prop, ctx);
+  if (classValue != null) return classValue;
+  return null;
+}
+
+function getClassStyleValue(el, prop, ctx) {
   const classAttr = el.getAttribute('class');
-  if (!classAttr) return [];
-  const names = [];
+  if (!classAttr) return null;
+
+  let value = null;
   for (const cls of classAttr.trim().split(/\s+/)) {
-    if (ctx.classStyles.has(cls)) names.push(cls);
+    const entry = ctx.classStyles.get(cls);
+    if (!entry) continue;
+    if (entry.props.has(prop)) value = entry.props.get(prop);
   }
-  return names;
+  return value;
 }
 
-// ── Color handling ──────────────────────────────────────────────────────────
+function getComputedStyleValue(el, prop) {
+  const win = el.ownerDocument?.defaultView;
+  if (!win?.getComputedStyle) return null;
 
-// xcolor base colors: exact RGB values from the xcolor package
-const XCOLOR_COLORS = [
-  ['black', 0, 0, 0], ['darkgray', 64, 64, 64], ['gray', 128, 128, 128],
-  ['lightgray', 191, 191, 191], ['white', 255, 255, 255],
-  ['red', 255, 0, 0], ['green', 0, 255, 0], ['blue', 0, 0, 255],
-  ['cyan', 0, 255, 255], ['magenta', 255, 0, 255], ['yellow', 255, 255, 0],
-  ['lime', 191, 255, 0], ['olive', 128, 128, 0], ['orange', 255, 128, 0],
-  ['pink', 255, 191, 191], ['teal', 0, 128, 128], ['violet', 128, 0, 128],
-  ['purple', 191, 0, 64], ['brown', 191, 128, 64],
-];
+  const computed = win.getComputedStyle(el);
+  if (!computed) return null;
 
-// Build exact-match lookup: hex → xcolor name
-const XCOLOR_EXACT = new Map();
-for (const [name, r, g, b] of XCOLOR_COLORS) {
-  const hex = ((r << 16) | (g << 8) | b).toString(16).toUpperCase().padStart(6, '0');
-  XCOLOR_EXACT.set(hex, name);
+  const camel = prop.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+  const value = computed.getPropertyValue?.(prop) || computed[camel];
+  return value && value !== '' ? value : null;
 }
 
-function hexToRgb(hex) {
-  const n = parseInt(hex, 16);
-  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
-}
+function parseStyleMap(styleText) {
+  const props = new Map();
+  if (!styleText) return props;
 
-function nearestColorName(hex) {
-  const [r, g, b] = hexToRgb(hex);
-  let bestName = 'gray';
-  let bestDist = Infinity;
-  for (const [name, pr, pg, pb] of XCOLOR_COLORS) {
-    const dr = r - pr, dg = g - pg, db = b - pb;
-    const dist = dr * dr + dg * dg + db * db;
-    if (dist < bestDist) {
-      bestDist = dist;
-      bestName = name;
-    }
+  for (const decl of styleText.split(';')) {
+    const colon = decl.indexOf(':');
+    if (colon < 0) continue;
+    const prop = decl.slice(0, colon).trim();
+    const value = decl.slice(colon + 1).trim();
+    if (prop && value) props.set(prop, value);
   }
-  return bestName;
+
+  return props;
 }
-
-function colorToHex(colorStr) {
-  if (!colorStr || colorStr === 'none' || colorStr === 'transparent') return null;
-
-  const canvas = document.createElement('canvas');
-  canvas.width = canvas.height = 1;
-  const c = canvas.getContext('2d');
-  c.fillStyle = colorStr;
-  c.fillRect(0, 0, 1, 1);
-  const [r, g, b, a] = c.getImageData(0, 0, 1, 1).data;
-  if (a === 0 && colorStr !== 'black' && colorStr !== '#000' && colorStr !== '#000000') {
-    return null;
-  }
-  return ((r << 16) | (g << 8) | b).toString(16).toUpperCase().padStart(6, '0');
-}
-
-function getTikzColor(hex, ctx) {
-  if (!hex) return null;
-  // Exact xcolor built-in: use directly, no \definecolor needed
-  if (XCOLOR_EXACT.has(hex)) return XCOLOR_EXACT.get(hex);
-  // Already defined custom color
-  if (ctx.colors.has(hex)) return ctx.colors.get(hex);
-  // Name based on nearest xcolor, always with numeric suffix to avoid clashes
-  const baseName = nearestColorName(hex);
-  let suffix = 1;
-  let name = baseName + suffix;
-  const usedNames = new Set(ctx.colors.values());
-  while (usedNames.has(name)) {
-    suffix++;
-    name = baseName + suffix;
-  }
-  ctx.colors.set(hex, name);
-  return name;
-}
-
-// ── Gradient fill detection ─────────────────────────────────────────────────
 
 function parseUrlRef(str) {
   if (!str) return null;
-  // Handle url(#id), url("#id"), url('#id')
-  const m = str.match(/url\(["']?#([^"')]+)["']?\)/);
-  return m ? m[1] : null;
+  const match = str.match(/url\(["']?#([^"')]+)["']?\)/);
+  return match ? match[1] : null;
+}
+
+function resolveMarkerRef(str) {
+  return parseUrlRef(str);
 }
 
 function getGradientOpts(gradId, ctx) {
@@ -502,213 +465,427 @@ function getGradientOpts(gradId, ctx) {
     return [`inner color=${c1}`, `outer color=${c2}`];
   }
 
-  // Linear gradient: map angle to TikZ shading direction
-  // SVG angle: 0° = left→right, 90° = top→bottom
-  // TikZ: left color / right color with shading angle
   const angle = grad.angle || 0;
-
-  // Normalize to TikZ shading angle (TikZ 0° = left→right)
-  // SVG y-axis is flipped relative to TikZ, so negate the vertical component
   const tikzAngle = -angle;
 
   if (Math.abs(angle) < 1) {
     return [`left color=${c1}`, `right color=${c2}`];
-  } else if (Math.abs(angle - 90) < 1) {
-    return [`top color=${c1}`, `bottom color=${c2}`];
-  } else if (Math.abs(angle + 90) < 1 || Math.abs(angle - 270) < 1) {
-    return [`bottom color=${c1}`, `top color=${c2}`];
-  } else if (Math.abs(Math.abs(angle) - 180) < 1) {
-    return [`right color=${c1}`, `left color=${c2}`];
-  } else {
-    return [`left color=${c1}`, `right color=${c2}`, `shading angle=${fmt(tikzAngle, ctx)}`];
   }
+  if (Math.abs(angle - 90) < 1) {
+    return [`top color=${c1}`, `bottom color=${c2}`];
+  }
+  if (Math.abs(angle + 90) < 1 || Math.abs(angle - 270) < 1) {
+    return [`bottom color=${c1}`, `top color=${c2}`];
+  }
+  if (Math.abs(Math.abs(angle) - 180) < 1) {
+    return [`right color=${c1}`, `left color=${c2}`];
+  }
+  return [`left color=${c1}`, `right color=${c2}`, `shading angle=${fmt(tikzAngle, ctx)}`];
 }
 
-// ── Arrow/marker detection ──────────────────────────────────────────────────
-
-function resolveMarkerRef(str) {
-  return parseUrlRef(str);
-}
-
-function getArrowOpts(style, ctx) {
-  const startRef = resolveMarkerRef(style.markerStart);
-  const endRef = resolveMarkerRef(style.markerEnd);
-
-  const startIsArrow = startRef && ctx.markers.get(startRef)?.isArrow;
-  const endIsArrow = endRef && ctx.markers.get(endRef)?.isArrow;
-
-  if (startIsArrow && endIsArrow) { ctx.usesArrows = true; return '<->'; }
-  if (endIsArrow) { ctx.usesArrows = true; return '->'; }
-  if (startIsArrow) { ctx.usesArrows = true; return '<-'; }
-  return null;
-}
-
-// ── TikZ option building ────────────────────────────────────────────────────
-
-// Returns { cmd, opts } where cmd is draw/fill/filldraw/shade/shadedraw
-// and opts are clean (no redundant fill/draw that the cmd already implies).
 function buildDrawCommand(el, style, ctx) {
-  const opts = [];
-
-  // CSS class styles (as named TikZ styles)
-  const classNames = getClassStyleNames(el, ctx);
-  for (const cn of classNames) opts.push(cn);
-
-  // Skip inline fill/stroke if fully covered by class styles
-  const classCoversAll = classNames.length > 0 && !el.getAttribute('fill')
-    && !el.getAttribute('stroke') && !el.style?.fill && !el.style?.stroke;
-
-  // Check for gradient fill
+  const opts = [...getClassStyleNames(el, ctx)];
   const gradId = parseUrlRef(style.fill);
   const gradOpts = gradId ? getGradientOpts(gradId, ctx) : null;
-  const hasGrad = !!gradOpts;
+  const hasGradient = !!gradOpts;
 
-  // Resolve fill
-  let fillColor = null; // TikZ color name, or true for black
   let hasFill = false;
-  if (hasGrad) {
+  let fillColor = null;
+  if (hasGradient) {
     hasFill = true;
     opts.push(...gradOpts);
-  } else if (!classCoversAll) {
+  } else {
     const fillHex = colorToHex(style.fill);
     hasFill = fillHex !== null && style.fill !== 'none';
     if (hasFill) fillColor = getTikzColor(fillHex, ctx);
   }
 
-  // Resolve stroke
-  let strokeColor = null;
-  let hasStroke = false;
-  if (!classCoversAll) {
-    const strokeHex = colorToHex(style.stroke);
-    hasStroke = strokeHex !== null && style.stroke !== 'none';
-    if (hasStroke) strokeColor = getTikzColor(strokeHex, ctx);
-  }
+  const strokeHex = colorToHex(style.stroke);
+  const hasStroke = strokeHex !== null && style.stroke !== 'none';
+  const strokeColor = hasStroke ? getTikzColor(strokeHex, ctx) : null;
 
-  // Pick command
-  // Pick command: prefer \draw (with fill= if needed) over \filldraw
-  let cmd;
-  if (hasGrad && hasStroke) cmd = 'shadedraw';
-  else if (hasGrad) cmd = 'shade';
+  let cmd = 'draw';
+  if (hasGradient && hasStroke) cmd = 'shadedraw';
+  else if (hasGradient) cmd = 'shade';
   else if (hasStroke) cmd = 'draw';
   else if (hasFill) cmd = 'fill';
-  else cmd = 'draw';
 
-  // Build color options (prepended for nice ordering)
-  // \draw[blue, fill=red, ...] — stroke color bare, fill explicit
-  // \fill[red, ...] — fill color bare
-  const colorOpts = [];
-
-  if (hasStroke) {
-    if (strokeColor && strokeColor !== 'black') colorOpts.push(strokeColor);
+  if (hasStroke && strokeColor && strokeColor !== 'black') {
+    opts.push(strokeColor);
   }
-  if (!hasGrad && hasFill) {
+
+  if (!hasGradient && hasFill) {
     if (cmd === 'fill') {
-      // \fill: fill color goes bare
-      if (fillColor === 'black') { /* implied */ }
-      else if (fillColor) colorOpts.push(fillColor);
-    } else {
-      // \draw with fill: need explicit fill=
-      if (fillColor === 'black') colorOpts.push('fill');
-      else if (fillColor) colorOpts.push(`fill=${fillColor}`);
+      if (fillColor && fillColor !== 'black') opts.push(fillColor);
+    } else if (fillColor === 'black') {
+      opts.push('fill');
+    } else if (fillColor) {
+      opts.push(`fill=${fillColor}`);
     }
   }
 
-  opts.unshift(...colorOpts);
-
-  // Stroke width
-  if (hasStroke) {
-    const w = parseFloat(style.strokeWidth) || 1;
-    opts.push(`line width=${dimPt(w, ctx)}`);
-  }
-
-  // Arrow tips
-  const arrow = getArrowOpts(style, ctx);
-  if (arrow) opts.push(arrow);
-
-  // Opacity
-  if (style.opacity && parseFloat(style.opacity) < 1) {
-    opts.push(`opacity=${parseFloat(style.opacity)}`);
-  }
-  if (style.fillOpacity && parseFloat(style.fillOpacity) < 1) {
-    opts.push(`fill opacity=${parseFloat(style.fillOpacity)}`);
-  }
-  if (style.strokeOpacity && parseFloat(style.strokeOpacity) < 1) {
-    opts.push(`draw opacity=${parseFloat(style.strokeOpacity)}`);
-  }
-
-  // Dash
-  if (style.strokeDasharray && style.strokeDasharray !== 'none') {
-    const parts = style.strokeDasharray.split(/[\s,]+/).map(Number);
-    if (parts.length === 1 || (parts.length === 2 && parts[0] === parts[1])) {
-      opts.push('dashed');
-    } else {
-      const pattern = parts.map((v, i) =>
-        (i % 2 === 0 ? 'on ' : 'off ') + dimPt(v, ctx)
-      ).join(' ');
-      opts.push(`dash pattern=${pattern}`);
-    }
-  }
-
-  // Line cap/join
-  if (style.strokeLinecap && style.strokeLinecap !== 'butt') {
-    opts.push(`line cap=${style.strokeLinecap}`);
-  }
-  if (style.strokeLinejoin && style.strokeLinejoin !== 'miter') {
-    opts.push(`line join=${style.strokeLinejoin}`);
-  }
+  appendStrokeAndOpacityOptions(opts, style, ctx);
 
   return { cmd, opts };
 }
 
-function optsStr(opts) {
-  return opts.length > 0 ? `[${opts.join(', ')}]` : '';
+function appendPaintOptions(opts, style, ctx) {
+  const fillHex = colorToHex(style.fill);
+  if (fillHex) {
+    const color = getTikzColor(fillHex, ctx);
+    opts.push(color === 'black' ? 'fill' : `fill=${color}`);
+  }
+
+  const strokeHex = colorToHex(style.stroke);
+  if (strokeHex) {
+    const color = getTikzColor(strokeHex, ctx);
+    opts.push(color === 'black' ? 'draw' : `draw=${color}`);
+  }
+
+  appendStrokeAndOpacityOptions(opts, style, ctx);
 }
 
-// ── Coordinate formatting ───────────────────────────────────────────────────
+function appendStrokeAndOpacityOptions(opts, style, ctx) {
+  const strokeHex = colorToHex(style.stroke);
+  const hasStroke = strokeHex !== null && style.stroke !== 'none';
+
+  if (hasStroke && style.strokeWidth != null) {
+    const width = parseNumeric(style.strokeWidth) ?? 1;
+    opts.push(`line width=${dimPt(width, ctx)}`);
+  }
+
+  const arrow = getArrowOpts(style, ctx);
+  if (arrow) opts.push(arrow);
+
+  const opacity = parseNumeric(style.opacity);
+  if (opacity != null && opacity < 1) opts.push(`opacity=${fmt(opacity, ctx)}`);
+
+  const fillOpacity = parseNumeric(style.fillOpacity);
+  if (fillOpacity != null && fillOpacity < 1) opts.push(`fill opacity=${fmt(fillOpacity, ctx)}`);
+
+  const strokeOpacity = parseNumeric(style.strokeOpacity);
+  if (strokeOpacity != null && strokeOpacity < 1) opts.push(`draw opacity=${fmt(strokeOpacity, ctx)}`);
+
+  if (style.fillRule === 'evenodd') opts.push('even odd rule');
+  else if (style.fillRule === 'nonzero') opts.push('nonzero rule');
+
+  const miterLimit = parseNumeric(style.strokeMiterlimit);
+  if (miterLimit != null && miterLimit >= 1 && Math.abs(miterLimit - 4) > EPSILON) {
+    opts.push(`miter limit=${fmt(miterLimit, ctx)}`);
+  }
+
+  const dashPattern = buildDashPattern(style, ctx);
+  if (dashPattern) opts.push(`dash pattern=${dashPattern}`);
+
+  const dashPhase = parseNumeric(style.strokeDashoffset);
+  if (dashPhase != null && Math.abs(dashPhase) > EPSILON) {
+    opts.push(`dash phase=${dimPt(dashPhase, ctx)}`);
+  }
+
+  const linecap = mapLinecap(style.strokeLinecap);
+  if (linecap) opts.push(`line cap=${linecap}`);
+
+  const linejoin = mapLinejoin(style.strokeLinejoin);
+  if (linejoin) opts.push(`line join=${linejoin}`);
+}
+
+function buildDashPattern(style, ctx) {
+  const parts = parseDashArray(style.strokeDasharray);
+  if (!parts.length) return null;
+
+  return parts.map((value, index) => `${index % 2 === 0 ? 'on' : 'off'} ${dimPt(value, ctx)}`).join(' ');
+}
+
+function parseDashArray(dasharray) {
+  if (!dasharray || dasharray === 'none') return [];
+
+  const parts = dasharray
+    .replace(/,/g, ' ')
+    .trim()
+    .split(/\s+/)
+    .map(parseNumeric)
+    .filter(value => value != null && value >= 0);
+
+  if (!parts.length) return [];
+  return parts.length % 2 === 1 ? [...parts, ...parts] : parts;
+}
+
+function mapLinecap(linecap) {
+  if (!linecap || linecap === 'butt') return null;
+  if (linecap === 'square') return 'rect';
+  return linecap;
+}
+
+function mapLinejoin(linejoin) {
+  if (!linejoin || linejoin === 'miter') return null;
+  return linejoin;
+}
+
+function getArrowOpts(style, ctx) {
+  const startRef = resolveMarkerRef(style.markerStart);
+  const endRef = resolveMarkerRef(style.markerEnd);
+  const startIsArrow = startRef && ctx.markers.get(startRef)?.isArrow;
+  const endIsArrow = endRef && ctx.markers.get(endRef)?.isArrow;
+
+  if (startIsArrow && endIsArrow) {
+    ctx.usesArrows = true;
+    return '<->';
+  }
+  if (endIsArrow) {
+    ctx.usesArrows = true;
+    return '->';
+  }
+  if (startIsArrow) {
+    ctx.usesArrows = true;
+    return '<-';
+  }
+  return null;
+}
+
+function getClassStyleNames(el, ctx) {
+  const classAttr = el.getAttribute('class');
+  if (!classAttr) return [];
+
+  return classAttr
+    .trim()
+    .split(/\s+/)
+    .filter(cls => ctx.classStyles.has(cls));
+}
+
+function buildTransformScopes(transform, ctx, forNode) {
+  if (!transform || isIdentityTransform(transform)) return [];
+
+  let opts = buildAtomicTransformOptionList(transform, ctx);
+  if (opts == null) opts = buildCmTransformOpts(transform, ctx);
+  if (forNode && opts.length > 0) {
+    opts = ['transform shape', ...opts];
+  }
+  return opts.length ? [opts] : [];
+}
+
+function buildAtomicTransformOptionList(transform, ctx) {
+  const ops = transform?.ops ?? [];
+  if (!ops.length) return [];
+
+  const steps = [];
+  for (const op of ops) {
+    const opSteps = buildAtomicScopesForOp(op, ctx);
+    if (opSteps == null) return null;
+    steps.push(...opSteps);
+  }
+
+  return compactTransformSteps(steps);
+}
+
+function buildAtomicScopesForOp(op, ctx) {
+  switch (op.type) {
+    case 'translate': {
+      const opts = buildShiftOpts(op.tx * ctx.scale, -op.ty * ctx.scale, ctx);
+      return opts.length ? [opts] : [];
+    }
+    case 'rotate': {
+      const angle = -(op.angle || 0);
+      if (Math.abs(angle) < EPSILON) return [];
+      const pivot = coord(op.cx || 0, op.cy || 0, ctx);
+      return [[`rotate around={${fmt(angle, ctx)}:${pivot}}`]];
+    }
+    case 'scale': {
+      const sx = op.sx ?? 1;
+      const sy = op.sy ?? 1;
+      const scaleOpts = [];
+      if (Math.abs(sx - sy) < EPSILON) {
+        if (Math.abs(sx - 1) < EPSILON) return [];
+        scaleOpts.push(`scale=${fmt(sx, ctx)}`);
+      } else {
+        if (Math.abs(sx - 1) >= EPSILON) scaleOpts.push(`xscale=${fmt(sx, ctx)}`);
+        if (Math.abs(sy - 1) >= EPSILON) scaleOpts.push(`yscale=${fmt(sy, ctx)}`);
+        if (!scaleOpts.length) return [];
+      }
+      return wrapPivotedTransform(coord(0, 0, ctx), scaleOpts, ctx);
+    }
+    case 'skewX': {
+      const factor = -Math.tan((op.angle || 0) * Math.PI / 180);
+      if (Math.abs(factor) < EPSILON) return [];
+      return wrapPivotedTransform(coord(0, 0, ctx), [`xslant=${fmt(factor, ctx)}`], ctx);
+    }
+    case 'skewY': {
+      const factor = -Math.tan((op.angle || 0) * Math.PI / 180);
+      if (Math.abs(factor) < EPSILON) return [];
+      return wrapPivotedTransform(coord(0, 0, ctx), [`yslant=${fmt(factor, ctx)}`], ctx);
+    }
+    default:
+      return null;
+  }
+}
+
+function compactTransformSteps(steps) {
+  const compacted = [];
+
+  for (const step of steps) {
+    if (!step.length) continue;
+
+    const prev = compacted[compacted.length - 1];
+    if (prev && isShiftStep(prev) && isShiftStep(step)) {
+      const merged = mergeShiftSteps(prev, step);
+      if (merged.length) {
+        compacted[compacted.length - 1] = merged;
+      } else {
+        compacted.pop();
+      }
+      continue;
+    }
+
+    compacted.push(step);
+  }
+
+  return compacted.flat();
+}
+
+function isShiftStep(step) {
+  return step.every(opt => opt.startsWith('xshift=') || opt.startsWith('yshift='));
+}
+
+function mergeShiftSteps(a, b) {
+  const merged = new Map([
+    ['xshift', 0],
+    ['yshift', 0],
+  ]);
+
+  for (const step of [a, b]) {
+    for (const opt of step) {
+      const match = opt.match(/^(xshift|yshift)=(-?\d+(?:\.\d+)?)cm$/);
+      if (!match) continue;
+      merged.set(match[1], (merged.get(match[1]) || 0) + parseFloat(match[2]));
+    }
+  }
+
+  const result = [];
+  const x = merged.get('xshift') || 0;
+  const y = merged.get('yshift') || 0;
+  if (Math.abs(x) >= EPSILON) result.push(`xshift=${trimFloat(x)}cm`);
+  if (Math.abs(y) >= EPSILON) result.push(`yshift=${trimFloat(y)}cm`);
+  return result;
+}
+
+function trimFloat(value) {
+  return parseFloat(value.toFixed(12));
+}
+
+function wrapPivotedTransform(pivot, transformOpts, ctx) {
+  const [px, py] = parseCoordTuple(pivot);
+  const startShift = buildShiftOpts(px, py, ctx);
+  const endShift = buildShiftOpts(-px, -py, ctx);
+
+  const scopes = [];
+  if (startShift.length) scopes.push(startShift);
+  scopes.push(transformOpts);
+  if (endShift.length) scopes.push(endShift);
+  return scopes;
+}
+
+function buildShiftOpts(x, y, ctx) {
+  const opts = [];
+  if (Math.abs(x) >= EPSILON) opts.push(`xshift=${fmt(x, ctx)}cm`);
+  if (Math.abs(y) >= EPSILON) opts.push(`yshift=${fmt(y, ctx)}cm`);
+  return opts;
+}
+
+function parseCoordTuple(coordText) {
+  const match = coordText.match(/^\(([^,]+),([^)]+)\)$/);
+  if (!match) return [0, 0];
+  return [parseFloat(match[1]), parseFloat(match[2])];
+}
+
+function buildCmTransformOpts(transform, ctx) {
+  const [a, b, c, d, tx, ty] = svgTransformToTikzCm(getTransformMatrix(transform), ctx);
+  return [`cm={${fmt(a, ctx)},${fmt(b, ctx)},${fmt(c, ctx)},${fmt(d, ctx)},${formatPoint(tx, ty, ctx)}}`];
+}
+
+function getTransformMatrix(transform) {
+  return Array.isArray(transform) ? transform : (transform?.matrix ?? identityTransform());
+}
+
+function svgTransformToTikzCm(transform, ctx) {
+  const [a, b, c, d, e, f] = transform;
+  const x0 = -ctx.viewBox.x * ctx.scale;
+  const y0 = (ctx.viewBox.y + ctx.viewBox.h) * ctx.scale;
+
+  const ma = a;
+  const mb = -b;
+  const mc = -c;
+  const md = d;
+  const tx = ctx.scale * e + x0 - (ma * x0 + mc * y0);
+  const ty = -ctx.scale * f + y0 - (mb * x0 + md * y0);
+
+  return [ma, mb, mc, md, tx, ty];
+}
 
 function fmt(val, ctx) {
-  return parseFloat(val.toFixed(ctx.precision));
+  return parseFloat(Number(val).toFixed(ctx.precision));
 }
 
-const CM_TO_PT = 28.4528; // TeX points: 1cm = 28.4528pt (1pt = 1/72.27in)
-
-// Format a dimension in pt (for line width, rounded corners, dash patterns)
 function dimPt(svgUnits, ctx) {
   return `${fmt(svgUnits * ctx.scale * CM_TO_PT, ctx)}pt`;
 }
 
-function coord(x, y, ctx, transform) {
-  const [tx, ty] = applyTransform(transform, x, y);
-  const sx = (tx - ctx.viewBox.x) * ctx.scale;
-  const sy = (ctx.viewBox.y + ctx.viewBox.h - ty) * ctx.scale;
-  return `(${fmt(sx, ctx)},${fmt(sy, ctx)})`;
+function coord(x, y, ctx) {
+  const sx = (x - ctx.viewBox.x) * ctx.scale;
+  const sy = (ctx.viewBox.y + ctx.viewBox.h - y) * ctx.scale;
+  return formatPoint(sx, sy, ctx);
 }
 
-// ── Emit helpers ────────────────────────────────────────────────────────────
+function formatPoint(x, y, ctx) {
+  return `(${fmt(x, ctx)},${fmt(y, ctx)})`;
+}
 
 function emit(ctx, line) {
-  const indent = '  '.repeat(ctx.indent);
-  ctx.lines.push(indent + line);
+  ctx.lines.push(`${'  '.repeat(ctx.indent)}${line}`);
 }
 
-// ── Element processing ──────────────────────────────────────────────────────
+function withScope(ctx, opts, callback) {
+  if (!opts.length) {
+    callback();
+    return;
+  }
 
-function processElement(el, ctx, parentTransform) {
-  for (const child of el.children) {
+  emit(ctx, `\\begin{scope}${optsStr(opts)}`);
+  ctx.indent++;
+  callback();
+  ctx.indent--;
+  emit(ctx, '\\end{scope}');
+}
+
+function withTransformScopes(ctx, transform, forNode, callback) {
+  const scopes = buildTransformScopes(transform, ctx, forNode);
+  if (!scopes.length) {
+    callback();
+    return;
+  }
+
+  for (const opts of scopes) {
+    emit(ctx, `\\begin{scope}${optsStr(opts)}`);
+    ctx.indent++;
+  }
+
+  callback();
+
+  for (let i = scopes.length - 1; i >= 0; i--) {
+    ctx.indent--;
+    emit(ctx, '\\end{scope}');
+  }
+}
+
+function processChildren(parent, ctx) {
+  for (const child of parent.children || []) {
     const tag = child.tagName?.toLowerCase();
     if (!tag) continue;
 
-    const style = getStyle(child);
+    const style = getStyle(child, ctx);
     if (style.display === 'none' || style.visibility === 'hidden') continue;
 
-    const localTransform = parseTransformAttr(child.getAttribute('transform'));
-    const transform = multiplyTransforms(parentTransform, localTransform);
+    const transform = parseTransformAttr(child.getAttribute('transform'));
 
     switch (tag) {
-      case 'g':
-      case 'svg':
-        processElement(child, ctx, transform);
-        break;
       case 'defs':
       case 'clippath':
       case 'mask':
@@ -717,259 +894,589 @@ function processElement(el, ctx, parentTransform) {
       case 'title':
       case 'desc':
         break;
+      case 'g':
+      case 'svg':
+        emitGroup(child, ctx, style, transform);
+        break;
       case 'rect':
-        emitRect(child, ctx, transform, style);
+        emitRect(child, ctx, style, transform);
         break;
       case 'circle':
-        emitCircle(child, ctx, transform, style);
+        emitCircle(child, ctx, style, transform);
         break;
       case 'ellipse':
-        emitEllipse(child, ctx, transform, style);
+        emitEllipse(child, ctx, style, transform);
         break;
       case 'line':
-        emitLine(child, ctx, transform, style);
+        emitLine(child, ctx, style, transform);
         break;
       case 'polyline':
-        emitPolyline(child, ctx, transform, style, false);
+        emitPolyline(child, ctx, style, transform, false);
         break;
       case 'polygon':
-        emitPolyline(child, ctx, transform, style, true);
+        emitPolyline(child, ctx, style, transform, true);
         break;
       case 'path':
-        emitPath(child, ctx, transform, style);
+        emitPath(child, ctx, style, transform);
         break;
       case 'text':
-        emitText(child, ctx, transform, style);
+        emitText(child, ctx, style, transform);
         break;
       case 'use':
-        emitUse(child, ctx, transform);
+        emitUse(child, ctx, style, transform);
         break;
       default:
-        if (child.children.length > 0) {
-          processElement(child, ctx, transform);
-        }
+        if (child.children?.length) emitGroup(child, ctx, style, transform);
     }
   }
 }
 
-// ── Shape emitters ──────────────────────────────────────────────────────────
+function emitGroup(el, ctx, style, transform) {
+  const opacity = parseNumeric(style.opacity);
+  if (opacity != null && opacity < 1) {
+    withScope(ctx, [`opacity=${fmt(opacity, ctx)}`, 'transparency group'], () => {
+      withTransformScopes(ctx, transform, true, () => processChildren(el, ctx));
+    });
+    return;
+  }
 
-function emitRect(el, ctx, transform, style) {
-  const x = parseFloat(el.getAttribute('x')) || 0;
-  const y = parseFloat(el.getAttribute('y')) || 0;
-  const w = parseFloat(el.getAttribute('width')) || 0;
-  const h = parseFloat(el.getAttribute('height')) || 0;
-  const rx = parseFloat(el.getAttribute('rx')) || parseFloat(el.getAttribute('ry')) || 0;
+  withTransformScopes(ctx, transform, true, () => processChildren(el, ctx));
+}
 
+function emitRect(el, ctx, style, transform) {
+  const x = parseNumeric(el.getAttribute('x')) ?? 0;
+  const y = parseNumeric(el.getAttribute('y')) ?? 0;
+  const w = parseNumeric(el.getAttribute('width')) ?? 0;
+  const h = parseNumeric(el.getAttribute('height')) ?? 0;
+  const rx = parseNumeric(el.getAttribute('rx'));
+  const ry = parseNumeric(el.getAttribute('ry'));
   if (w === 0 || h === 0) return;
 
   const { cmd, opts } = buildDrawCommand(el, style, ctx);
-  if (rx > 0) {
-    opts.push(`rounded corners=${dimPt(rx, ctx)}`);
-  }
+  const radius = rx ?? ry;
+  if (radius != null && radius > 0) opts.push(`rounded corners=${dimPt(radius, ctx)}`);
 
-  const c1 = coord(x, y, ctx, transform);
-  const c2 = coord(x + w, y + h, ctx, transform);
-  emit(ctx, `\\${cmd}${optsStr(opts)} ${c1} rectangle ${c2};`);
+  withTransformScopes(ctx, transform, false, () => {
+    emit(ctx, `\\${cmd}${optsStr(opts)} ${coord(x, y, ctx)} rectangle ${coord(x + w, y + h, ctx)};`);
+  });
 }
 
-function emitCircle(el, ctx, transform, style) {
-  const cx = parseFloat(el.getAttribute('cx')) || 0;
-  const cy = parseFloat(el.getAttribute('cy')) || 0;
-  const r = parseFloat(el.getAttribute('r')) || 0;
-
+function emitCircle(el, ctx, style, transform) {
+  const cx = parseNumeric(el.getAttribute('cx')) ?? 0;
+  const cy = parseNumeric(el.getAttribute('cy')) ?? 0;
+  const r = parseNumeric(el.getAttribute('r')) ?? 0;
   if (r === 0) return;
 
   const { cmd, opts } = buildDrawCommand(el, style, ctx);
-  const center = coord(cx, cy, ctx, transform);
-  emit(ctx, `\\${cmd}${optsStr(opts)} ${center} circle[radius=${fmt(r * ctx.scale, ctx)}cm];`);
+  withTransformScopes(ctx, transform, false, () => {
+    emit(ctx, `\\${cmd}${optsStr(opts)} ${coord(cx, cy, ctx)} circle[radius=${fmt(r * ctx.scale, ctx)}cm];`);
+  });
 }
 
-function emitEllipse(el, ctx, transform, style) {
-  const cx = parseFloat(el.getAttribute('cx')) || 0;
-  const cy = parseFloat(el.getAttribute('cy')) || 0;
-  const rx = parseFloat(el.getAttribute('rx')) || 0;
-  const ry = parseFloat(el.getAttribute('ry')) || 0;
-
+function emitEllipse(el, ctx, style, transform) {
+  const cx = parseNumeric(el.getAttribute('cx')) ?? 0;
+  const cy = parseNumeric(el.getAttribute('cy')) ?? 0;
+  const rx = parseNumeric(el.getAttribute('rx')) ?? 0;
+  const ry = parseNumeric(el.getAttribute('ry')) ?? 0;
   if (rx === 0 && ry === 0) return;
 
   const { cmd, opts } = buildDrawCommand(el, style, ctx);
-  const center = coord(cx, cy, ctx, transform);
-  emit(ctx, `\\${cmd}${optsStr(opts)} ${center} ellipse[x radius=${fmt(rx * ctx.scale, ctx)}cm, y radius=${fmt(ry * ctx.scale, ctx)}cm];`);
+  withTransformScopes(ctx, transform, false, () => {
+    emit(ctx, `\\${cmd}${optsStr(opts)} ${coord(cx, cy, ctx)} ellipse[x radius=${fmt(rx * ctx.scale, ctx)}cm, y radius=${fmt(ry * ctx.scale, ctx)}cm];`);
+  });
 }
 
-function emitLine(el, ctx, transform, style) {
-  const x1 = parseFloat(el.getAttribute('x1')) || 0;
-  const y1 = parseFloat(el.getAttribute('y1')) || 0;
-  const x2 = parseFloat(el.getAttribute('x2')) || 0;
-  const y2 = parseFloat(el.getAttribute('y2')) || 0;
+function emitLine(el, ctx, style, transform) {
+  const x1 = parseNumeric(el.getAttribute('x1')) ?? 0;
+  const y1 = parseNumeric(el.getAttribute('y1')) ?? 0;
+  const x2 = parseNumeric(el.getAttribute('x2')) ?? 0;
+  const y2 = parseNumeric(el.getAttribute('y2')) ?? 0;
 
   const { cmd, opts } = buildDrawCommand(el, style, ctx);
-  const c1 = coord(x1, y1, ctx, transform);
-  const c2 = coord(x2, y2, ctx, transform);
-  emit(ctx, `\\${cmd}${optsStr(opts)} ${c1} -- ${c2};`);
+  withTransformScopes(ctx, transform, false, () => {
+    emit(ctx, `\\${cmd}${optsStr(opts)} ${coord(x1, y1, ctx)} -- ${coord(x2, y2, ctx)};`);
+  });
 }
 
-function emitPolyline(el, ctx, transform, style, close) {
-  const pts = el.getAttribute('points');
-  if (!pts) return;
-  const coords = pts.trim().split(/[\s,]+/).map(Number);
+function emitPolyline(el, ctx, style, transform, close) {
+  const pointsAttr = el.getAttribute('points');
+  if (!pointsAttr) return;
+
+  const coords = pointsAttr.trim().split(/[\s,]+/).map(Number);
   if (coords.length < 4) return;
 
-  const { cmd, opts } = buildDrawCommand(el, style, ctx);
   const points = [];
   for (let i = 0; i < coords.length; i += 2) {
-    points.push(coord(coords[i], coords[i + 1], ctx, transform));
+    points.push(coord(coords[i], coords[i + 1], ctx));
   }
 
-  // Line-wrap if many points
-  if (points.length > 4) {
-    const indent = '  '.repeat(ctx.indent);
-    const contIndent = indent + '  ';
-    const lines = [`\\${cmd}${optsStr(opts)} ${points[0]}`];
-    for (let i = 1; i < points.length; i++) {
-      lines.push(`${contIndent}-- ${points[i]}`);
+  const { cmd, opts } = buildDrawCommand(el, style, ctx);
+  withTransformScopes(ctx, transform, false, () => {
+    if (points.length <= 4) {
+      emit(ctx, `\\${cmd}${optsStr(opts)} ${points.join(' -- ')}${close ? ' -- cycle' : ''};`);
+      return;
     }
-    if (close) lines.push(`${contIndent}-- cycle`);
-    ctx.lines.push(indent + lines[0]);
-    for (let i = 1; i < lines.length - 1; i++) ctx.lines.push(lines[i]);
-    ctx.lines.push(lines[lines.length - 1] + ';');
-  } else {
-    emit(ctx, `\\${cmd}${optsStr(opts)} ${points.join(' -- ')}${close ? ' -- cycle' : ''};`);
-  }
+
+    const indent = '  '.repeat(ctx.indent);
+    const contIndent = `${indent}  `;
+    ctx.lines.push(`${indent}\\${cmd}${optsStr(opts)} ${points[0]}`);
+    for (let i = 1; i < points.length; i++) {
+      ctx.lines.push(`${contIndent}-- ${points[i]}`);
+    }
+    ctx.lines[ctx.lines.length - 1] += close ? ' -- cycle;' : ';';
+  });
 }
 
-function emitPath(el, ctx, transform, style) {
+function emitPath(el, ctx, style, transform) {
   const d = el.getAttribute('d');
   if (!d) return;
 
   const segments = parsePath(d);
-  if (segments.length === 0) return;
+  if (!segments.length) return;
 
   const { cmd, opts } = buildDrawCommand(el, style, ctx);
+  const ops = [];
 
-  // Build path operations
-  const ops = []; // each op is a string like "(x,y)" or "-- (x,y)" etc.
   for (const seg of segments) {
     switch (seg.type) {
       case 'M':
-        ops.push({ text: coord(seg.x, seg.y, ctx, transform), isMoveTo: true });
+        ops.push({ text: coord(seg.x, seg.y, ctx) });
         break;
       case 'L':
-        ops.push({ text: `-- ${coord(seg.x, seg.y, ctx, transform)}` });
+        ops.push({ text: `-- ${coord(seg.x, seg.y, ctx)}` });
         break;
       case 'C':
         ops.push({
-          text: `.. controls ${coord(seg.x1, seg.y1, ctx, transform)} and ${coord(seg.x2, seg.y2, ctx, transform)}\n`
-            + '  '.repeat(ctx.indent + 2) + `.. ${coord(seg.x, seg.y, ctx, transform)}`,
+          text: `.. controls ${coord(seg.x1, seg.y1, ctx)} and ${coord(seg.x2, seg.y2, ctx)} .. ${coord(seg.x, seg.y, ctx)}`,
           isCurve: true,
         });
         break;
       case 'Z':
         ops.push({ text: '-- cycle' });
         break;
+      default:
+        break;
     }
   }
 
-  if (ops.length === 0) return;
+  if (!ops.length) return;
+  withTransformScopes(ctx, transform, false, () => {
+    if (ops.length <= 3 && !ops.some(op => op.isCurve)) {
+      emit(ctx, `\\${cmd}${optsStr(opts)} ${ops.map(op => op.text).join(' ')};`);
+      return;
+    }
 
-  // Format: one operation per line for readability (if path is non-trivial)
-  const indent = '  '.repeat(ctx.indent);
-  const contIndent = '  '.repeat(ctx.indent + 1);
-
-  if (ops.length <= 3 && !ops.some(o => o.isCurve)) {
-    // Short path: single line
-    emit(ctx, `\\${cmd}${optsStr(opts)} ${ops.map(o => o.text).join(' ')};`);
-  } else {
-    // Multi-line path
-    const firstLine = `\\${cmd}${optsStr(opts)} ${ops[0].text}`;
-    ctx.lines.push(indent + firstLine);
+    const indent = '  '.repeat(ctx.indent);
+    const contIndent = `${indent}  `;
+    ctx.lines.push(`${indent}\\${cmd}${optsStr(opts)} ${ops[0].text}`);
     for (let i = 1; i < ops.length; i++) {
-      const isLast = i === ops.length - 1;
-      const suffix = isLast ? ';' : '';
-      ctx.lines.push(contIndent + ops[i].text + suffix);
+      ctx.lines.push(`${contIndent}${ops[i].text}${i === ops.length - 1 ? ';' : ''}`);
     }
-    if (ops.length === 1) {
-      // Edge case: single moveto, add semicolon
-      ctx.lines[ctx.lines.length - 1] += ';';
-    }
-  }
+  });
 }
 
-function emitText(el, ctx, transform, style) {
-  const x = parseFloat(el.getAttribute('x')) || 0;
-  const y = parseFloat(el.getAttribute('y')) || 0;
-  const text = el.textContent?.trim();
+function emitText(el, ctx, style, transform) {
+  const x = parseTextCoord(el, 'x') ?? 0;
+  const y = parseTextCoord(el, 'y') ?? 0;
+  const text = serializeText(el, ctx).trim();
   if (!text) return;
 
-  const opts = [];
-
-  // CSS class styles
-  for (const cn of getClassStyleNames(el, ctx)) opts.push(cn);
-
-  // Color
-  const fillHex = colorToHex(style.fill);
-  if (fillHex && fillHex !== '000000') {
-    const c = getTikzColor(fillHex, ctx);
-    opts.push(`text=${c}`);
-  }
-
-  // Font size
-  if (style.fontSize) {
-    const size = parseFloat(style.fontSize);
-    if (!isNaN(size)) {
-      const scaledSize = size * ctx.scale;
-      if (scaledSize < 0.25) opts.push('font=\\tiny');
-      else if (scaledSize < 0.3) opts.push('font=\\scriptsize');
-      else if (scaledSize < 0.35) opts.push('font=\\footnotesize');
-      else if (scaledSize < 0.4) opts.push('font=\\small');
-      else if (scaledSize > 0.6) opts.push('font=\\large');
-      else if (scaledSize > 0.8) opts.push('font=\\Large');
-    }
-  }
-
-  // Bold
-  if (style.fontWeight === 'bold' || parseFloat(style.fontWeight) >= 700) {
-    const existing = opts.findIndex(o => o.startsWith('font='));
-    if (existing >= 0) {
-      opts[existing] = opts[existing] + '\\bfseries';
-    } else {
-      opts.push('font=\\bfseries');
-    }
-  }
-
-  // Anchor
-  const anchor = style.textAnchor;
-  if (anchor === 'middle') opts.push('anchor=base');
-  else if (anchor === 'end') opts.push('anchor=base east');
-  else opts.push('anchor=base west');
-
-  const c = coord(x, y, ctx, transform);
-  emit(ctx, `\\node${optsStr(opts)} at ${c} {${escapeLatex(text)}};`);
+  const opts = buildTextOpts(style, ctx);
+  withTransformScopes(ctx, transform, true, () => {
+    emit(ctx, `\\node${optsStr(opts)} at ${coord(x, y, ctx)} {${text}};`);
+  });
 }
 
-function emitUse(el, ctx, transform) {
-  const href = el.getAttribute('href') || el.getAttributeNS('http://www.w3.org/1999/xlink', 'href');
-  if (!href || !href.startsWith('#')) return;
+function emitUse(el, ctx, style, transform) {
+  const href = el.getAttribute('href') || el.getAttributeNS(XLINK_NS, 'href');
+  if (!href?.startsWith('#')) return;
+
   const target = el.ownerDocument.getElementById(href.slice(1));
   if (!target) return;
 
-  const x = parseFloat(el.getAttribute('x')) || 0;
-  const y = parseFloat(el.getAttribute('y')) || 0;
-  const localTransform = parseTransformAttr(el.getAttribute('transform'));
-  const useTransform = multiplyTransforms(
-    multiplyTransforms(transform, localTransform),
-    [1, 0, 0, 1, x, y]
-  );
+  const x = parseNumeric(el.getAttribute('x')) ?? 0;
+  const y = parseNumeric(el.getAttribute('y')) ?? 0;
+  const useTransform = combineTransforms(transform, {
+    matrix: [1, 0, 0, 1, x, y],
+    ops: (Math.abs(x) < EPSILON && Math.abs(y) < EPSILON) ? [] : [{ type: 'translate', tx: x, ty: y }],
+  });
+  const opacity = parseNumeric(style.opacity);
+  const render = () => {
+    withTransformScopes(ctx, useTransform, true, () => {
+      if (target.tagName?.toLowerCase() === 'g') processChildren(target, ctx);
+      else processChildren(wrapElement(target), ctx);
+    });
+  };
 
-  const fakeParent = { children: [target], tagName: 'g' };
-  processElement(fakeParent, ctx, useTransform);
+  if (opacity != null && opacity < 1) {
+    withScope(ctx, [`opacity=${fmt(opacity, ctx)}`, 'transparency group'], render);
+    return;
+  }
+
+  render();
 }
 
-// ── Helpers ─────────────────────────────────────────────────────────────────
+function combineTransforms(a, b) {
+  return {
+    matrix: multiplyTransforms(getTransformMatrix(a), getTransformMatrix(b)),
+    ops: [...(a?.ops ?? []), ...(b?.ops ?? [])],
+  };
+}
+
+function wrapElement(el) {
+  const doc = el.ownerDocument;
+  const group = doc.createElementNS?.(SVG_NS, 'g') ?? doc.createElement('g');
+  group.appendChild(el.cloneNode(true));
+  return group;
+}
+
+function buildTextOpts(style, ctx) {
+  const opts = [];
+  const fillHex = colorToHex(style.fill);
+  if (fillHex && fillHex !== '000000') {
+    opts.push(`text=${getTikzColor(fillHex, ctx)}`);
+  }
+
+  const opacity = parseNumeric(style.opacity);
+  if (opacity != null && opacity < 1) opts.push(`text opacity=${fmt(opacity, ctx)}`);
+
+  const anchor = mapTextAnchor(style.textAnchor, style.dominantBaseline);
+  if (anchor) opts.push(`anchor=${anchor}`);
+
+  const fontOpt = buildFontOption(style, ctx);
+  if (fontOpt) opts.push(fontOpt);
+
+  return opts;
+}
+
+function buildFontOption(style, ctx) {
+  const commands = [];
+  const family = mapFontFamily(style.fontFamily);
+  if (family) commands.push(family);
+
+  const size = mapFontSize(style.fontSize, ctx);
+  if (size) commands.push(size);
+
+  const weight = style.fontWeight?.toLowerCase?.();
+  if (weight === 'bold' || (parseNumeric(style.fontWeight) ?? 0) >= 700) {
+    commands.push('\\bfseries');
+  }
+
+  if (style.fontStyle?.toLowerCase?.() === 'italic' || style.fontStyle?.toLowerCase?.() === 'oblique') {
+    commands.push('\\itshape');
+  }
+
+  if (!commands.length) return null;
+  return `font={${commands.join('')}}`;
+}
+
+function mapFontFamily(fontFamily) {
+  if (!fontFamily) return null;
+  const family = fontFamily.toLowerCase();
+  if (family.includes('mono') || family.includes('courier') || family.includes('consolas') || family.includes('cascadia')) {
+    return '\\ttfamily';
+  }
+  if (family.includes('sans') || family.includes('helvetica') || family.includes('arial') || family.includes('montserrat')) {
+    return '\\sffamily';
+  }
+  return null;
+}
+
+function mapFontSize(fontSize, ctx) {
+  const size = parseNumeric(fontSize);
+  if (size == null) return null;
+
+  const scaled = size * ctx.scale;
+  if (scaled < 0.18) return '\\tiny';
+  if (scaled < 0.24) return '\\scriptsize';
+  if (scaled < 0.3) return '\\footnotesize';
+  if (scaled < 0.4) return '\\small';
+  if (scaled > 0.85) return '\\Large';
+  if (scaled > 0.6) return '\\large';
+  return null;
+}
+
+function mapTextAnchor(textAnchor, dominantBaseline) {
+  const horizontal = textAnchor === 'middle' ? '' : textAnchor === 'end' ? ' east' : ' west';
+
+  switch ((dominantBaseline || '').toLowerCase()) {
+    case 'middle':
+    case 'central':
+      return `mid${horizontal}`.trim();
+    case 'hanging':
+    case 'text-before-edge':
+      return `north${horizontal}`.trim();
+    case 'text-after-edge':
+    case 'ideographic':
+    case 'bottom':
+      return `south${horizontal}`.trim();
+    default:
+      return `base${horizontal}`.trim();
+  }
+}
+
+function parseTextCoord(el, attr) {
+  const own = el.getAttribute(attr);
+  if (own) return parseNumeric(own.split(/[\s,]+/)[0]);
+
+  const tspan = el.querySelector('tspan');
+  const tspanValue = tspan?.getAttribute(attr);
+  return tspanValue ? parseNumeric(tspanValue.split(/[\s,]+/)[0]) : null;
+}
+
+function serializeText(el, ctx) {
+  const style = getStyle(el, ctx);
+  const state = { hasText: false };
+  return serializeTextNode(el, ctx, style, style, state);
+}
+
+function serializeTextNode(node, ctx, inheritedStyle, rootStyle, state) {
+  if (node.nodeType === 3) {
+    const text = normalizeTextChunk(node.nodeValue || '');
+    if (!text) return '';
+    state.hasText = true;
+    return escapeLatex(text);
+  }
+
+  if (node.nodeType !== 1) return '';
+  const tag = node.tagName?.toLowerCase();
+  if (tag !== 'text' && tag !== 'tspan') return '';
+
+  const style = getStyle(node, ctx);
+  const hadContentBefore = state.hasText;
+  let content = '';
+
+  for (const child of node.childNodes) {
+    const part = serializeTextNode(child, ctx, style, rootStyle, state);
+    if (!part) continue;
+    content += part;
+  }
+
+  if (!content.trim()) return '';
+
+  if (tag === 'tspan' && shouldStartNewTextLine(node) && hadContentBefore) {
+    content = `\\\\ ${content}`;
+  }
+
+  content = applyInlineTextStyles(content, style, inheritedStyle, rootStyle);
+  return content;
+}
+
+function shouldStartNewTextLine(node) {
+  return node.hasAttribute('x') || node.hasAttribute('y') || node.hasAttribute('dy');
+}
+
+function applyInlineTextStyles(content, style, inheritedStyle, rootStyle) {
+  let result = content;
+  const rootFillHex = colorToHex(rootStyle.fill);
+
+  if (style.fontStyle !== inheritedStyle.fontStyle && (style.fontStyle === 'italic' || style.fontStyle === 'oblique')) {
+    result = `\\textit{${result}}`;
+  }
+
+  const weight = parseNumeric(style.fontWeight) ?? 0;
+  const inheritedWeight = parseNumeric(inheritedStyle.fontWeight) ?? 0;
+  const isBold = style.fontWeight === 'bold' || weight >= 700;
+  const inheritedBold = inheritedStyle.fontWeight === 'bold' || inheritedWeight >= 700;
+  if (isBold && !inheritedBold) {
+    result = `\\textbf{${result}}`;
+  }
+
+  const fillHex = colorToHex(style.fill);
+  const inheritedFillHex = colorToHex(inheritedStyle.fill);
+  const needsExplicitBlack = fillHex === '000000' && inheritedFillHex != null && inheritedFillHex !== '000000';
+  if (fillHex && fillHex !== inheritedFillHex && fillHex !== rootFillHex && (fillHex !== '000000' || needsExplicitBlack)) {
+    result = fillHex === '000000'
+      ? `\\textcolor{black}{${result}}`
+      : `\\textcolor[HTML]{${fillHex}}{${result}}`;
+  }
+
+  const baseline = (style.baselineShift || '').toLowerCase();
+  if (baseline.includes('super')) result = `\\(^{${result}}\\)`;
+  else if (baseline.includes('sub')) result = `\\(_{${result}}\\)`;
+
+  return result;
+}
+
+function normalizeTextChunk(text) {
+  return text.replace(/\s+/g, ' ');
+}
+
+function optsStr(opts) {
+  return opts.length ? `[${opts.join(', ')}]` : '';
+}
+
+function colorToHex(colorStr) {
+  if (!colorStr) return null;
+  const color = colorStr.trim().toLowerCase();
+  if (!color || color === 'none' || color === 'transparent') return null;
+
+  if (CSS_COLOR_KEYWORDS.has(color)) return CSS_COLOR_KEYWORDS.get(color);
+
+  const hexMatch = color.match(/^#([0-9a-f]{3,8})$/i);
+  if (hexMatch) return normalizeHex(hexMatch[1]);
+
+  const rgbMatch = color.match(/^rgba?\(([^)]+)\)$/i);
+  if (rgbMatch) {
+    const parts = rgbMatch[1].split(',').map(part => part.trim());
+    if (parts.length >= 3) {
+      const rgb = parts.slice(0, 3).map(parseCssChannel);
+      if (rgb.every(value => value != null)) {
+        return toHex(rgb[0], rgb[1], rgb[2]);
+      }
+    }
+  }
+
+  const hslMatch = color.match(/^hsla?\(([^)]+)\)$/i);
+  if (hslMatch) {
+    const parts = hslMatch[1].split(',').map(part => part.trim());
+    if (parts.length >= 3) {
+      const h = parseNumeric(parts[0]) ?? 0;
+      const s = parsePercentOrNumber(parts[1]);
+      const l = parsePercentOrNumber(parts[2]);
+      if (s != null && l != null) {
+        const [r, g, b] = hslToRgb(h, s, l);
+        return toHex(r, g, b);
+      }
+    }
+  }
+
+  if (typeof document !== 'undefined') {
+    const canvas = document.createElement('canvas');
+    canvas.width = canvas.height = 1;
+    const context = canvas.getContext('2d');
+    if (context) {
+      context.fillStyle = colorStr;
+      const normalized = context.fillStyle;
+      if (normalized && normalized !== '#000000' && normalized !== 'rgba(0, 0, 0, 0)') {
+        return colorToHex(normalized);
+      }
+      if (normalized === '#000000' && color === 'black') return '000000';
+    }
+  }
+
+  return null;
+}
+
+function normalizeHex(hex) {
+  if (hex.length === 3) {
+    return hex.split('').map(ch => ch + ch).join('').toUpperCase();
+  }
+  if (hex.length === 4) {
+    return hex.slice(0, 3).split('').map(ch => ch + ch).join('').toUpperCase();
+  }
+  if (hex.length === 6) return hex.toUpperCase();
+  if (hex.length === 8) return hex.slice(0, 6).toUpperCase();
+  return null;
+}
+
+function parseCssChannel(part) {
+  if (part.endsWith('%')) {
+    const pct = parseNumeric(part.slice(0, -1));
+    return pct == null ? null : clampChannel((pct / 100) * 255);
+  }
+
+  const value = parseNumeric(part);
+  return value == null ? null : clampChannel(value);
+}
+
+function clampChannel(value) {
+  return Math.max(0, Math.min(255, Math.round(value)));
+}
+
+function hslToRgb(h, s, l) {
+  const hue = ((h % 360) + 360) % 360 / 360;
+  const sat = Math.max(0, Math.min(1, s));
+  const light = Math.max(0, Math.min(1, l));
+
+  if (sat === 0) {
+    const gray = clampChannel(light * 255);
+    return [gray, gray, gray];
+  }
+
+  const q = light < 0.5 ? light * (1 + sat) : light + sat - light * sat;
+  const p = 2 * light - q;
+  const toChannel = t => {
+    let value = t;
+    if (value < 0) value += 1;
+    if (value > 1) value -= 1;
+    if (value < 1 / 6) return p + (q - p) * 6 * value;
+    if (value < 1 / 2) return q;
+    if (value < 2 / 3) return p + (q - p) * (2 / 3 - value) * 6;
+    return p;
+  };
+
+  return [
+    clampChannel(toChannel(hue + 1 / 3) * 255),
+    clampChannel(toChannel(hue) * 255),
+    clampChannel(toChannel(hue - 1 / 3) * 255),
+  ];
+}
+
+function toHex(r, g, b) {
+  return ((r << 16) | (g << 8) | b).toString(16).toUpperCase().padStart(6, '0');
+}
+
+function hexToRgb(hex) {
+  const value = parseInt(hex, 16);
+  return [(value >> 16) & 255, (value >> 8) & 255, value & 255];
+}
+
+function nearestColorName(hex) {
+  const [r, g, b] = hexToRgb(hex);
+  let bestName = 'gray';
+  let bestDistance = Infinity;
+
+  for (const [name, pr, pg, pb] of XCOLOR_COLORS) {
+    const dr = r - pr;
+    const dg = g - pg;
+    const db = b - pb;
+    const dist = dr * dr + dg * dg + db * db;
+    if (dist < bestDistance) {
+      bestDistance = dist;
+      bestName = name;
+    }
+  }
+
+  return bestName;
+}
+
+function getTikzColor(hex, ctx) {
+  if (!hex) return null;
+  if (XCOLOR_EXACT.has(hex)) return XCOLOR_EXACT.get(hex);
+  if (ctx.colors.has(hex)) return ctx.colors.get(hex);
+
+  const baseName = nearestColorName(hex);
+  let suffix = 1;
+  let name = `${baseName}${suffix}`;
+  const usedNames = new Set(ctx.colors.values());
+  while (usedNames.has(name)) {
+    suffix += 1;
+    name = `${baseName}${suffix}`;
+  }
+
+  ctx.colors.set(hex, name);
+  return name;
+}
+
+function parseNumeric(value) {
+  if (value == null || value === '') return null;
+  const num = parseFloat(String(value));
+  return Number.isFinite(num) ? num : null;
+}
+
+function parsePercentOrNumber(value) {
+  if (value == null || value === '') return null;
+  const text = String(value).trim();
+  if (text.endsWith('%')) {
+    const num = parseNumeric(text.slice(0, -1));
+    return num == null ? null : num / 100;
+  }
+  return parseNumeric(text);
+}
 
 function escapeLatex(str) {
   return str
     .replace(/\\/g, '\\textbackslash{}')
-    .replace(/[&%$#_{}~^]/g, m => '\\' + m);
+    .replace(/[&%$#_{}~^]/g, char => `\\${char}`);
 }

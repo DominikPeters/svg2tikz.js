@@ -2,7 +2,15 @@
   "name": "svg2tikz",
   "private": true,
   "type": "module",
+  "bin": {
+    "svg2tikz": "./bin/svg2tikz.js"
+  },
   "scripts": {
-    "dev": "npx serve -p 8123"
+    "dev": "npx serve -p 8123",
+    "test": "node --test",
+    "cli": "node ./bin/svg2tikz.js"
+  },
+  "devDependencies": {
+    "jsdom": "^26.0.0"
   }
 }
