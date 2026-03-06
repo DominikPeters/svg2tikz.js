@@ -8,6 +8,7 @@
   "exports": {
     ".": {
       "types": "./dist/src/svg2tikz.d.ts",
+      "browser": "./dist/browser/svg2tikz.js",
       "default": "./dist/src/svg2tikz.js"
     },
     "./node-env": {
@@ -20,10 +21,11 @@
   },
   "files": [
     "dist/src",
-    "dist/bin"
+    "dist/bin",
+    "dist/browser"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && esbuild src/svg2tikz.ts --bundle --format=esm --platform=browser --outfile=dist/browser/svg2tikz.js",
     "prepublishOnly": "npm run build && npm test",
     "predev": "npm run build",
     "dev": "npx serve -p 8123",
@@ -55,6 +57,7 @@
   },
   "devDependencies": {
     "@types/node": "^24.5.2",
+    "esbuild": "^0.27.3",
     "typescript": "^5.9.2"
   },
   "engines": {

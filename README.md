@@ -37,6 +37,8 @@ svg2tikz input.svg -p 3 -o output.tex
 
 ### Browser
 
+With a bundler (Vite, webpack, etc.):
+
 ```typescript
 import { svgToTikz } from 'svg2tikz';
 
@@ -46,6 +48,16 @@ const svg = `<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
 
 const tikz = svgToTikz(svg);
 console.log(tikz);
+```
+
+Via CDN (no build step required):
+
+```html
+<script type="module">
+  import { svgToTikz } from 'https://cdn.jsdelivr.net/npm/svg2tikz/dist/browser/svg2tikz.js';
+
+  const tikz = svgToTikz(svgString);
+</script>
 ```
 
 ### Node.js
